@@ -4,10 +4,12 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Tuple
+from typing import Iterator, Optional, Tuple
 
 import numpy as np
 from highspy import Highs, HighsStatus, ObjSense, HighsVarType  # type: ignore[import]
+import gurobipy as gp
+from gurobipy import GRB
 
 
 @dataclass
@@ -152,10 +154,17 @@ def read_mps(path: str) -> LPData:
     return lp_data
 
 
-def solve_with_highs(path: str, *, log_to_console: bool = False) -> HighsResult:
+def solve_with_highs(
+    path: str,
+    *,
+    log_to_console: bool = False,
+    log_file: Optional[str] = None,
+) -> HighsResult:
     """Solve the LP in the provided MPS file with HiGHS."""
     highs, lp_data = _load_highs_model(path)
     highs.setOptionValue("output_flag", bool(log_to_console))
+    if log_file is not None:
+        highs.setOptionValue("log_file", str(log_file))
     run_status = highs.run()
     if run_status != HighsStatus.kOk:
         highs.clear()
@@ -167,5 +176,56 @@ def solve_with_highs(path: str, *, log_to_console: bool = False) -> HighsResult:
     highs.clear()
     return HighsResult(x=x, objective=objective)
 
+def solve_with_gurobi(
+    path: str,
+    *,
+    log_to_console: bool = False,
+    log_file: Optional[str] = None,
+) -> HighsResult:
+    """Solve the LP in the provided MPS file with Gurobi."""
 
-__all__ = ["LPData", "HighsResult", "read_mps", "solve_with_highs"]
+    # Load model from MPS file
+    model = gp.read(path)
+    if not log_to_console:
+        model.Params.OutputFlag = 0
+    if log_file is not None:
+        model.Params.LogFile = str(log_file)
+    model.optimize()
+    if model.Status not in [GRB.OPTIMAL, GRB.SUBOPTIMAL]:
+        model.dispose()
+        raise RuntimeError(f"Gurobi failed to solve model: status {model.Status}.")
+
+    # Map results to dense x (with bounds) via LPData
+    _, lp_data = _load_highs_model(path)  # To get mapping/order and objective coeffs
+    x_vars = []
+    for var in model.getVars():
+        x_vars.append(var.X)
+    x = np.asarray(x_vars, dtype=float)
+    objective = float(lp_data.c @ x + lp_data.obj_offset)
+    model.dispose()
+    return HighsResult(x=x, objective=objective)
+
+def solve_lp_reference(
+    path: str,
+    *,
+    solver: str = "highs",
+    log_to_console: bool = False,
+    log_file: Optional[str] = None,
+) -> HighsResult:
+    """Solve the LP in the provided MPS file with the selected solver (HiGHS or Gurobi)."""
+    if solver.lower() == "highs":
+        return solve_with_highs(path, log_to_console=log_to_console, log_file=log_file)
+    elif solver.lower() == "gurobi":
+        return solve_with_gurobi(path, log_to_console=log_to_console, log_file=log_file)
+    else:
+        raise ValueError(f"Unknown solver '{solver}'. Use 'highs' or 'gurobi'.")
+
+
+__all__ = [
+    "LPData",
+    "HighsResult",
+    "read_mps",
+    "solve_with_highs",
+    "solve_with_gurobi",
+    "solve_lp_reference",
+]
