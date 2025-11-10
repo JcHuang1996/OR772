@@ -1,8 +1,12 @@
 from pathlib import Path
+from typing import Literal
 
 from algo_PDHG import PDHGResult, pdhg
+from algo_PDLP import PDLPResult, pdlp
 from lp_precondition import PrecondMethod, PreconditionerData, apply_preconditioner
-from mps_process import HighsResult, LPData, read_mps, solve_with_highs
+from mps_process import HighsResult, LPData, read_mps, solve_lp_reference
+
+ReferenceSolver = Literal["highs", "gurobi"]
 
 
 def run_pdhg(
@@ -13,13 +17,19 @@ def run_pdhg(
     omega: float = 1.0,
     eta_scale: float = 0.9,
     check_every: int = 25,
+    objective_stride: int = 0,
     precond: PrecondMethod = "ruiz_pc",
     precond_tol: float = 1e-2,
     precond_iters: int = 10,
-    verbose: bool = False,
+    ref_solver: ReferenceSolver = "highs",
+    ref_verbose: bool = False,
 ) -> tuple[PDHGResult, PreconditionerData, LPData, HighsResult]:
     path = Path(case_path).expanduser().resolve()
-    reference_result = solve_with_highs(str(path), log_to_console=verbose)
+    reference_result = solve_lp_reference(
+        str(path),
+        solver=ref_solver,
+        log_to_console=ref_verbose,
+    )
     lp = read_mps(str(path))
     lp_scaled, precond_data = apply_preconditioner(
         lp,
@@ -35,19 +45,82 @@ def run_pdhg(
         omega=omega,
         eta_scale=eta_scale,
         check_every=check_every,
+        objective_stride=objective_stride,
+        reference_objective=reference_result.objective,
         precond=precond_data if precond != "none" else None,
     )
-
-    if verbose:
-        print(f"Reference objective: {reference_result.objective:.6f}")
-        print(f"PDHG objective     : {result.objective:.6f}")
-        print(f"Objective gap      : {result.objective - reference_result.objective:.6e}")
-        print(f"Primal residual    : {result.primal_residual:.3e}")
-        print(f"Dual residual      : {result.dual_residual:.3e}")
-        print(f"Iterations         : {result.iterations}")
-        print(f"Converged          : {result.converged}")
 
     return result, precond_data, lp, reference_result
 
 
-__all__ = ["run_pdhg"]
+def run_pdlp(
+    case_path: str,
+    *,
+    max_outer: int = 50,
+    max_inner: int = 2000,
+    tol: float = 1e-6,
+    check_every: int = 50,
+    objective_stride: int = 0,
+    precond: PrecondMethod = "ruiz_pc",
+    precond_tol: float = 1e-2,
+    precond_iters: int = 10,
+    ref_solver: ReferenceSolver = "highs",
+    ref_verbose: bool = False,
+) -> tuple[PDLPResult, PreconditionerData, LPData, HighsResult]:
+    path = Path(case_path).expanduser().resolve()
+    reference_result = solve_lp_reference(
+        str(path),
+        solver=ref_solver,
+        log_to_console=ref_verbose,
+    )
+    lp = read_mps(str(path))
+    lp_scaled, precond_data = apply_preconditioner(
+        lp,
+        method=precond,
+        tol=precond_tol,
+        max_iters=precond_iters,
+    )
+
+    result = pdlp(
+        lp_scaled,
+        max_outer=max_outer,
+        max_inner=max_inner,
+        tol=tol,
+        check_every=check_every,
+        objective_stride=objective_stride,
+        reference_objective=reference_result.objective,
+        precond=precond_data if precond != "none" else None,
+    )
+
+    return result, precond_data, lp, reference_result
+
+
+def resolve_case_paths(target: Path) -> list[Path]:
+    """Return a sorted list of case files from a file or directory input."""
+    path = target.expanduser().resolve()
+    if path.is_file():
+        if _is_supported_case(path):
+            return [path]
+        raise ValueError(f"Unsupported case file extension: {path.name}")
+    if not path.is_dir():
+        raise FileNotFoundError(f"No such file or directory: {path}")
+
+    case_paths = sorted(p for p in path.iterdir() if _is_supported_case(p))
+    if not case_paths:
+        raise ValueError(f"No .mps or .mps.bz2 files found under {path}")
+    return case_paths
+
+
+def _is_supported_case(path: Path) -> bool:
+    """Check whether the path points to a supported case file."""
+    if not path.is_file():
+        return False
+    suffixes = [s.lower() for s in path.suffixes]
+    if not suffixes:
+        return False
+    if suffixes[-1] == ".mps":
+        return True
+    return len(suffixes) >= 2 and suffixes[-2:] == [".mps", ".bz2"]
+
+
+__all__ = ["run_pdhg", "run_pdlp", "ReferenceSolver", "resolve_case_paths"]

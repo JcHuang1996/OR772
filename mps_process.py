@@ -4,12 +4,17 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Optional, Tuple
+from typing import Iterator, Tuple
 
 import numpy as np
 from highspy import Highs, HighsStatus, ObjSense, HighsVarType  # type: ignore[import]
-import gurobipy as gp
-from gurobipy import GRB
+
+try:
+    import gurobipy as gp
+    from gurobipy import GRB
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    gp = None
+    GRB = None
 
 
 @dataclass
@@ -158,13 +163,10 @@ def solve_with_highs(
     path: str,
     *,
     log_to_console: bool = False,
-    log_file: Optional[str] = None,
 ) -> HighsResult:
-    """Solve the LP in the provided MPS file with HiGHS."""
+    """Solve the LP in the provided MPS file with HiGHS, printing logs to stdout when enabled."""
     highs, lp_data = _load_highs_model(path)
     highs.setOptionValue("output_flag", bool(log_to_console))
-    if log_file is not None:
-        highs.setOptionValue("log_file", str(log_file))
     run_status = highs.run()
     if run_status != HighsStatus.kOk:
         highs.clear()
@@ -180,29 +182,30 @@ def solve_with_gurobi(
     path: str,
     *,
     log_to_console: bool = False,
-    log_file: Optional[str] = None,
 ) -> HighsResult:
-    """Solve the LP in the provided MPS file with Gurobi."""
+    """Solve the LP in the provided MPS file with Gurobi, printing logs to stdout when enabled."""
+    if gp is None or GRB is None:
+        raise ImportError(
+            "gurobipy is not installed. Install Gurobi's Python bindings or select --ref-solver highs."
+        )
 
     # Load model from MPS file
     model = gp.read(path)
-    if not log_to_console:
-        model.Params.OutputFlag = 0
-    if log_file is not None:
-        model.Params.LogFile = str(log_file)
-    model.optimize()
-    if model.Status not in [GRB.OPTIMAL, GRB.SUBOPTIMAL]:
-        model.dispose()
-        raise RuntimeError(f"Gurobi failed to solve model: status {model.Status}.")
+    model_relaxed = model.relax()
+    model_relaxed.Params.OutputFlag = 1 if log_to_console else 0
+    model_relaxed.optimize()
+    if model_relaxed.Status not in [GRB.OPTIMAL, GRB.SUBOPTIMAL]:
+        model_relaxed.dispose()
+        raise RuntimeError(f"Gurobi failed to solve model: status {model_relaxed.Status}.")
 
     # Map results to dense x (with bounds) via LPData
     _, lp_data = _load_highs_model(path)  # To get mapping/order and objective coeffs
     x_vars = []
-    for var in model.getVars():
+    for var in model_relaxed.getVars():
         x_vars.append(var.X)
     x = np.asarray(x_vars, dtype=float)
     objective = float(lp_data.c @ x + lp_data.obj_offset)
-    model.dispose()
+    model_relaxed.dispose()
     return HighsResult(x=x, objective=objective)
 
 def solve_lp_reference(
@@ -210,13 +213,12 @@ def solve_lp_reference(
     *,
     solver: str = "highs",
     log_to_console: bool = False,
-    log_file: Optional[str] = None,
 ) -> HighsResult:
     """Solve the LP in the provided MPS file with the selected solver (HiGHS or Gurobi)."""
     if solver.lower() == "highs":
-        return solve_with_highs(path, log_to_console=log_to_console, log_file=log_file)
+        return solve_with_highs(path, log_to_console=log_to_console)
     elif solver.lower() == "gurobi":
-        return solve_with_gurobi(path, log_to_console=log_to_console, log_file=log_file)
+        return solve_with_gurobi(path, log_to_console=log_to_console)
     else:
         raise ValueError(f"Unknown solver '{solver}'. Use 'highs' or 'gurobi'.")
 

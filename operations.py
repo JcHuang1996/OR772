@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import numpy as np
 
@@ -19,7 +19,13 @@ def proj_dual(y: np.ndarray, m_ineq: int) -> np.ndarray:
     return projected
 
 
-def estimate_spectral_norm(K: np.ndarray, *, iters: int = 20, seed: Optional[int] = None) -> float:
+def estimate_spectral_norm(
+    K: np.ndarray,
+    *,
+    iters: int = 20,
+    seed: Optional[int] = None,
+    matvec_callback: Optional[Callable[[], None]] = None,
+) -> float:
     """Estimate ||K||_2 using power iteration."""
     if K.size == 0:
         return 0.0
@@ -32,10 +38,14 @@ def estimate_spectral_norm(K: np.ndarray, *, iters: int = 20, seed: Optional[int
     v /= v_norm
     for _ in range(max(iters, 1)):
         w = K @ v
+        if matvec_callback is not None:
+            matvec_callback()
         w_norm = np.linalg.norm(w)
         if w_norm == 0.0:
             return 0.0
         v = K.T @ (w / w_norm)
+        if matvec_callback is not None:
+            matvec_callback()
         v_norm = np.linalg.norm(v)
         if v_norm == 0.0:
             return 0.0
@@ -72,22 +82,49 @@ def project_lambda(v: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> np.nd
     return lam
 
 
-def compute_duality_gap(lp: LPData, x: np.ndarray, y: np.ndarray, omega: float) -> Tuple[float, float, float]:
+def compute_duality_gap(
+    lp: LPData,
+    x: np.ndarray,
+    y: np.ndarray,
+    omega: float,
+    *,
+    K: Optional[np.ndarray] = None,
+    q: Optional[np.ndarray] = None,
+    matvec_callback: Optional[Callable[[], None]] = None,
+) -> Tuple[float, float, float]:
     """Compute primal objective, dual candidate, and their gap."""
-    if lp.m_ineq and lp.m_eq:
-        K = np.vstack([lp.G, lp.A])
-        q = np.concatenate([lp.h, lp.b])
-    elif lp.m_ineq:
-        K = lp.G
-        q = lp.h
-    elif lp.m_eq:
-        K = lp.A
-        q = lp.b
+    if K is None:
+        if lp.m_ineq and lp.m_eq:
+            K_local = np.vstack([lp.G, lp.A])
+            q_local = np.concatenate([lp.h, lp.b])
+        elif lp.m_ineq:
+            K_local = lp.G
+            q_local = lp.h
+        elif lp.m_eq:
+            K_local = lp.A
+            q_local = lp.b
+        else:
+            K_local = np.zeros((0, lp.n_vars), dtype=float)
+            q_local = np.zeros((0,), dtype=float)
     else:
-        K = np.zeros((0, lp.n_vars), dtype=float)
-        q = np.zeros((0,), dtype=float)
+        K_local = K
+        if q is not None:
+            q_local = q
+        elif lp.m_ineq and lp.m_eq:
+            q_local = np.concatenate([lp.h, lp.b])
+        elif lp.m_ineq:
+            q_local = lp.h
+        elif lp.m_eq:
+            q_local = lp.b
+        else:
+            q_local = np.zeros((0,), dtype=float)
 
-    reduced_cost = lp.c - K.T @ y if K.size else lp.c.copy()
+    if K_local.size:
+        reduced_cost = lp.c - K_local.T @ y
+        if matvec_callback is not None:
+            matvec_callback()
+    else:
+        reduced_cost = lp.c.copy()
     lam = project_lambda(reduced_cost, lp.lower, lp.upper)
 
     lam_pos = np.maximum(lam, 0.0)
@@ -97,7 +134,7 @@ def compute_duality_gap(lp: LPData, x: np.ndarray, y: np.ndarray, omega: float) 
     finite_upper = np.where(np.isfinite(lp.upper), lp.upper, 0.0)
 
     primal_obj = float(lp.c @ x + lp.obj_offset)
-    dual_term = float(q @ y) if y.size else 0.0
+    dual_term = float(q_local @ y) if y.size else 0.0
     bound_term = float(finite_lower @ lam_pos + finite_upper @ lam_neg)
     dual_obj = dual_term + bound_term + lp.obj_offset
 

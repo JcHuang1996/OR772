@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -34,11 +34,13 @@ class PDLPResult:
     iterations: int
     outer_iterations: int
     converged: bool
+    k_multiplications: int
     objective_history: List[float] = field(default_factory=list)
     dual_objective_history: List[float] = field(default_factory=list)
     duality_gap_history: List[float] = field(default_factory=list)
     primal_residual_history: List[float] = field(default_factory=list)
     dual_residual_history: List[float] = field(default_factory=list)
+    objective_distance_trace: List[Tuple[int, float]] = field(default_factory=list)
 
 
 def pdlp(
@@ -52,6 +54,8 @@ def pdlp(
     theta_weight: float = 0.5,
     eps_zero: float = 1e-12,
     check_every: int = 50,
+    objective_stride: int = 0,
+    reference_objective: Optional[float] = None,
     precond: Optional[PreconditionerData] = None,
 ) -> PDLPResult:
     """Run PDLP with adaptive modules."""
@@ -59,6 +63,10 @@ def pdlp(
         raise ValueError("max_outer and max_inner must be positive.")
     if tol <= 0.0:
         raise ValueError("tol must be positive.")
+    if objective_stride < 0:
+        raise ValueError("objective_stride must be non-negative.")
+    if objective_stride > 0 and reference_objective is None:
+        raise ValueError("reference_objective is required when objective_stride > 0.")
 
     n = lp.n_vars
     m_total = lp.m_ineq + lp.m_eq
@@ -74,9 +82,15 @@ def pdlp(
 
     q = np.concatenate([lp.h, lp.b]) if m_total else np.zeros((0,), dtype=float)
 
+    tracker = _KMultiplicationTracker(
+        lp=lp,
+        reference_objective=reference_objective,
+        stride=objective_stride,
+    )
+
     # Step size initialization
     if K.size:
-        spectral_norm = estimate_spectral_norm(K)
+        spectral_norm = estimate_spectral_norm(K, matvec_callback=lambda: tracker.bump())
         norm_inf = np.linalg.norm(K, ord=np.inf)
         norm_bound = max(spectral_norm, norm_inf, 1e-6)
         eta_max = 1.0 / max(spectral_norm, 1e-6)
@@ -90,6 +104,22 @@ def pdlp(
 
     x = np.clip(np.zeros(n, dtype=float), lp.lower, lp.upper)
     y = np.zeros(m_total, dtype=float)
+
+    def apply_K(vec: np.ndarray, *, sample_primal: Optional[np.ndarray] = None) -> np.ndarray:
+        if not m_total:
+            return np.zeros((0,), dtype=float)
+        result = K @ vec
+        tracker.bump(sample_primal)
+        return result
+
+    def apply_K_transpose(
+        vec: np.ndarray, *, sample_primal: Optional[np.ndarray] = None
+    ) -> np.ndarray:
+        if not m_total:
+            return np.zeros(n, dtype=float)
+        result = K.T @ vec
+        tracker.bump(sample_primal)
+        return result
 
     z_curr = (x.copy(), y.copy())
     z_prev_start = (x.copy(), y.copy())
@@ -116,20 +146,32 @@ def pdlp(
         mu_candidate_prev = np.inf
 
         mu_prev_epoch = (
-            _normalized_gap(lp, z_start, z_prev_start, omega, eps_zero) if epoch > 0 else np.inf
+            _normalized_gap(
+                lp,
+                z_start,
+                z_prev_start,
+                omega,
+                eps_zero,
+                tracker=tracker,
+                K=K,
+                q=q,
+            )
+            if epoch > 0
+            else np.inf
         )
 
         while t < max_inner:
             iterations += 1
             z_next, eta_accepted, eta_hat = _adaptive_step_of_pdhg(
                 lp=lp,
-                K=K,
                 q=q,
                 omega=omega,
                 eta_hat=eta_hat,
                 eta_max=eta_max,
                 k=iterations - 1,
                 z=z_curr,
+                apply_K=apply_K,
+                apply_K_transpose=apply_K_transpose,
             )
 
             accumulated_eta += eta_accepted
@@ -149,11 +191,33 @@ def pdlp(
                 z_start=z_start,
                 omega=omega,
                 eps_zero=eps_zero,
+                tracker=tracker,
+                K=K,
+                q=q,
             )
-            mu_candidate = _normalized_gap(lp, z_candidate, z_start, omega, eps_zero)
+            mu_candidate = _normalized_gap(
+                lp,
+                z_candidate,
+                z_start,
+                omega,
+                eps_zero,
+                tracker=tracker,
+                K=K,
+                q=q,
+            )
 
             if iterations % check_every == 0:
-                metrics = _evaluate_metrics(lp, z_candidate, K, tol, eps_zero)
+                metrics = _evaluate_metrics(
+                    lp,
+                    z_candidate,
+                    tol,
+                    eps_zero,
+                    apply_K=apply_K,
+                    apply_K_transpose=apply_K_transpose,
+                    tracker=tracker,
+                    K=K,
+                    q=q,
+                )
                 objective_history.append(metrics.objective)
                 dual_objective_history.append(metrics.dual_objective)
                 duality_gap_history.append(metrics.duality_gap)
@@ -197,7 +261,17 @@ def pdlp(
             eps_zero=eps_zero,
         )
 
-    final_metrics = _evaluate_metrics(lp, z_curr, K, tol, eps_zero)
+    final_metrics = _evaluate_metrics(
+        lp,
+        z_curr,
+        tol,
+        eps_zero,
+        apply_K=apply_K,
+        apply_K_transpose=apply_K_transpose,
+        tracker=tracker,
+        K=K,
+        q=q,
+    )
 
     if not objective_history:
         objective_history.append(final_metrics.objective)
@@ -228,24 +302,27 @@ def pdlp(
         iterations=iterations,
         outer_iterations=outer_iterations,
         converged=final_metrics.converged,
+        k_multiplications=tracker.count,
         objective_history=objective_history,
         dual_objective_history=dual_objective_history,
         duality_gap_history=duality_gap_history,
         primal_residual_history=primal_residual_history,
         dual_residual_history=dual_residual_history,
+        objective_distance_trace=tracker.samples,
     )
 
 
 def _adaptive_step_of_pdhg(
     *,
     lp: LPData,
-    K: np.ndarray,
     q: np.ndarray,
     omega: float,
     eta_hat: float,
     eta_max: float,
     k: int,
     z: Tuple[np.ndarray, np.ndarray],
+    apply_K: Callable[[np.ndarray, Optional[np.ndarray]], np.ndarray],
+    apply_K_transpose: Callable[[np.ndarray, Optional[np.ndarray]], np.ndarray],
 ) -> Tuple[Tuple[np.ndarray, np.ndarray], float, float]:
     """Module 1: safeguarded adaptive PDHG step."""
     x, y = z
@@ -253,12 +330,15 @@ def _adaptive_step_of_pdhg(
     m_total = y.size
 
     while True:
-        grad = lp.c - K.T @ y if m_total else lp.c
+        grad = lp.c - apply_K_transpose(y, sample_primal=None) if m_total else lp.c
         x_next = proj_box(x - (eta / omega) * grad, lp.lower, lp.upper)
         x_bar = 2.0 * x_next - x
 
         if m_total:
-            y_next = proj_dual(y + (eta * omega) * (q - K @ x_bar), lp.m_ineq)
+            y_next = proj_dual(
+                y + (eta * omega) * (q - apply_K(x_bar, sample_primal=x_next)),
+                lp.m_ineq,
+            )
         else:
             y_next = y.copy()
 
@@ -269,7 +349,9 @@ def _adaptive_step_of_pdhg(
             # No movement; accept current iterate with unchanged step size.
             return (x_next, y_next), eta, eta
 
-        denom = float(delta_y @ (K @ delta_x)) if K.size else 0.0
+        denom = float(
+            delta_y @ apply_K(delta_x, sample_primal=None)
+        ) if m_total else 0.0
         if denom <= 0.0:
             bar_eta = np.inf
         else:
@@ -297,10 +379,31 @@ def _get_restart_candidate(
     z_start: Tuple[np.ndarray, np.ndarray],
     omega: float,
     eps_zero: float,
+    tracker: "_KMultiplicationTracker",
+    K: np.ndarray,
+    q: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Module 2: choose restart candidate."""
-    mu_new = _normalized_gap(lp, z_new, z_start, omega, eps_zero)
-    mu_avg = _normalized_gap(lp, z_avg, z_start, omega, eps_zero)
+    mu_new = _normalized_gap(
+        lp,
+        z_new,
+        z_start,
+        omega,
+        eps_zero,
+        tracker=tracker,
+        K=K,
+        q=q,
+    )
+    mu_avg = _normalized_gap(
+        lp,
+        z_avg,
+        z_start,
+        omega,
+        eps_zero,
+        tracker=tracker,
+        K=K,
+        q=q,
+    )
     if mu_new < mu_avg:
         return z_new[0].copy(), z_new[1].copy()
     return z_avg[0].copy(), z_avg[1].copy()
@@ -330,9 +433,21 @@ def _normalized_gap(
     z_ref: Tuple[np.ndarray, np.ndarray],
     omega: float,
     eps_zero: float,
+    *,
+    tracker: "_KMultiplicationTracker",
+    K: np.ndarray,
+    q: np.ndarray,
 ) -> float:
     """Normalized duality gap heuristic."""
-    _, _, gap = compute_duality_gap(lp, z[0], z[1], omega=1.0)
+    _, _, gap = compute_duality_gap(
+        lp,
+        z[0],
+        z[1],
+        omega=1.0,
+        K=K,
+        q=q,
+        matvec_callback=lambda: tracker.bump(z[0]),
+    )
     radius = max(weighted_norm(z[0] - z_ref[0], z[1] - z_ref[1], omega), eps_zero)
     return abs(gap) / radius
 
@@ -355,7 +470,18 @@ def _should_restart(
     return sufficient_decay or necessary_decay or long_inner
 
 
-def _evaluate_metrics(lp: LPData, z: Tuple[np.ndarray, np.ndarray], K: np.ndarray, tol: float, eps_zero: float):
+def _evaluate_metrics(
+    lp: LPData,
+    z: Tuple[np.ndarray, np.ndarray],
+    tol: float,
+    eps_zero: float,
+    *,
+    apply_K: Callable[[np.ndarray, Optional[np.ndarray]], np.ndarray],
+    apply_K_transpose: Callable[[np.ndarray, Optional[np.ndarray]], np.ndarray],
+    tracker: "_KMultiplicationTracker",
+    K: np.ndarray,
+    q: np.ndarray,
+):
     x, y = z
     if lp.m_ineq:
         ineq_violation = np.minimum(lp.G @ x - lp.h, 0.0)
@@ -371,17 +497,25 @@ def _evaluate_metrics(lp: LPData, z: Tuple[np.ndarray, np.ndarray], K: np.ndarra
     primal_residual = float(np.linalg.norm(residual_vec, ord=2)) if residual_vec.size else 0.0
 
     if K.size:
-        reduced_cost = lp.c - K.T @ y
+        reduced_cost = lp.c - apply_K_transpose(y, sample_primal=x)
     else:
         reduced_cost = lp.c.copy()
     lam = project_lambda(reduced_cost, lp.lower, lp.upper)
-    dual_residual_vec = lp.c - (K.T @ y if K.size else 0.0) - lam
+    dual_residual_vec = lp.c - (apply_K_transpose(y, sample_primal=x) if K.size else 0.0) - lam
     if isinstance(dual_residual_vec, np.ndarray):
         dual_residual = float(np.linalg.norm(dual_residual_vec, ord=2))
     else:
         dual_residual = float(np.linalg.norm(lp.c - lam, ord=2))
 
-    primal_obj, dual_obj, gap = compute_duality_gap(lp, x, y, omega=1.0)
+    primal_obj, dual_obj, gap = compute_duality_gap(
+        lp,
+        x,
+        y,
+        omega=1.0,
+        K=K,
+        q=q,
+        matvec_callback=lambda: tracker.bump(x),
+    )
     tol_scale = tol * (1.0 + abs(primal_obj) + abs(dual_obj))
     converged = abs(gap) <= tol_scale and primal_residual <= tol_scale and dual_residual <= tol_scale
 
@@ -403,6 +537,37 @@ class _Metrics:
     primal_residual: float
     dual_residual: float
     converged: bool
+
+
+class _KMultiplicationTracker:
+    """Track K-matrix multiplications and objective distance samples for PDLP."""
+
+    def __init__(
+        self,
+        *,
+        lp: LPData,
+        reference_objective: Optional[float],
+        stride: int,
+    ) -> None:
+        self.lp = lp
+        self.reference_objective = reference_objective
+        self.stride = stride
+        self.count = 0
+        if stride > 0 and reference_objective is not None:
+            self._next_checkpoint: Optional[int] = stride
+        else:
+            self._next_checkpoint = None
+        self.samples: List[Tuple[int, float]] = []
+
+    def bump(self, primal: Optional[np.ndarray] = None, increments: int = 1) -> None:
+        self.count += increments
+        if self._next_checkpoint is None or primal is None or self.reference_objective is None:
+            return
+        while self.count >= self._next_checkpoint:
+            objective = float(self.lp.c @ primal + self.lp.obj_offset)
+            distance = abs(objective - self.reference_objective)
+            self.samples.append((self._next_checkpoint, distance))
+            self._next_checkpoint += self.stride
 
 
 def _initialize_primal_weight(c: np.ndarray, q: np.ndarray, eps_zero: float) -> float:
