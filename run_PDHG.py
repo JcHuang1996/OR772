@@ -5,15 +5,14 @@ from pathlib import Path
 from typing import List, Tuple
 
 from algo_PDHG import PDHGResult
-from main import ReferenceSolver, resolve_case_paths, run_pdhg
-from mps_process import HighsResult
+from main import resolve_case_paths, run_pdhg
 
 
-def _print_summary(case_path: Path, reference: HighsResult, result: PDHGResult) -> None:
+def _print_summary(case_path: Path, reference: float, result: PDHGResult) -> None:
     print(f"=== PDHG Summary: {case_path.name} ===")
-    print(f"Reference objective : {reference.objective:.6f}")
+    print(f"Reference objective : {reference:.6f}")
     print(f"PDHG objective      : {result.objective:.6f}")
-    print(f"Objective gap       : {result.objective - reference.objective:.3e}")
+    print(f"Objective gap       : {result.objective - reference:.3e}")
     print(f"Primal residual     : {result.primal_residual:.3e}")
     print(f"Dual residual       : {result.dual_residual:.3e}")
     print(f"Iterations          : {result.iterations}")
@@ -40,10 +39,8 @@ def _collect_case_results(
     precond: str,
     precond_tol: float,
     precond_iters: int,
-    ref_solver: ReferenceSolver,
-    ref_verbose: bool,
-) -> List[Tuple[Path, PDHGResult, HighsResult]]:
-    case_results: List[Tuple[Path, PDHGResult, HighsResult]] = []
+) -> List[Tuple[Path, PDHGResult, float]]:
+    case_results: List[Tuple[Path, PDHGResult, float]] = []
     for case_path in cases:
         result, _, _, reference = run_pdhg(
             str(case_path),
@@ -56,8 +53,6 @@ def _collect_case_results(
             precond=precond,  # type: ignore[arg-type]
             precond_tol=precond_tol,
             precond_iters=precond_iters,
-            ref_solver=ref_solver,
-            ref_verbose=ref_verbose,
         )
         case_results.append((case_path, result, reference))
     return case_results
@@ -88,18 +83,6 @@ def main() -> int:
     )
     parser.add_argument("--precond-tol", type=float, default=1e-2)
     parser.add_argument("--precond-iters", type=int, default=10)
-    parser.add_argument(
-        "--ref-solver",
-        type=str,
-        default="highs",
-        choices=["highs", "gurobi"],
-        help="Reference solver for objective comparison (default: highs).",
-    )
-    parser.add_argument(
-        "--ref-verbose",
-        action="store_true",
-        help="Stream reference solver logs to stdout.",
-    )
     parser.add_argument(
         "--output-root",
         type=Path,
@@ -140,8 +123,6 @@ def main() -> int:
         precond=args.precond,
         precond_tol=args.precond_tol,
         precond_iters=args.precond_iters,
-        ref_solver=args.ref_solver,
-        ref_verbose=args.ref_verbose,
     )
 
     for case_path, result, _ in case_results:
@@ -160,7 +141,7 @@ def main() -> int:
         records = [
             {
                 "case": str(case_path),
-                "reference_objective": reference.objective,
+                "reference_objective": reference,
                 "objective": result.objective,
                 "k_multiplications": result.k_multiplications,
                 "iterations": result.iterations,
@@ -187,8 +168,8 @@ def main() -> int:
 
     for case_path, result, reference in case_results:
         print(
-            f"{case_path.name}: ref={reference.objective:.6f}, "
-            f"obj={result.objective:.6f}, gap={result.objective - reference.objective:.3e}, "
+            f"{case_path.name}: ref={reference:.6f}, "
+            f"obj={result.objective:.6f}, gap={result.objective - reference:.3e}, "
             f"k-mults={result.k_multiplications}, iters={result.iterations}, converged={result.converged}"
         )
     print()

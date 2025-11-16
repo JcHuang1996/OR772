@@ -1,12 +1,10 @@
 from pathlib import Path
-from typing import Literal
 
 from algo_PDHG import PDHGResult, pdhg
 from algo_PDLP import PDLPResult, pdlp
 from lp_precondition import PrecondMethod, PreconditionerData, apply_preconditioner
-from mps_process import HighsResult, LPData, read_mps, solve_lp_reference
-
-ReferenceSolver = Literal["highs", "gurobi"]
+from mps_process import LPData, get_reference_objective, read_mps
+from typing import Optional, Dict
 
 
 def run_pdhg(
@@ -21,15 +19,9 @@ def run_pdhg(
     precond: PrecondMethod = "ruiz_pc",
     precond_tol: float = 1e-2,
     precond_iters: int = 10,
-    ref_solver: ReferenceSolver = "highs",
-    ref_verbose: bool = False,
-) -> tuple[PDHGResult, PreconditionerData, LPData, HighsResult]:
+) -> tuple[PDHGResult, PreconditionerData, LPData, float]:
     path = Path(case_path).expanduser().resolve()
-    reference_result = solve_lp_reference(
-        str(path),
-        solver=ref_solver,
-        log_to_console=ref_verbose,
-    )
+    reference_objective = get_reference_objective(str(path))
     lp = read_mps(str(path))
     lp_scaled, precond_data = apply_preconditioner(
         lp,
@@ -46,11 +38,11 @@ def run_pdhg(
         eta_scale=eta_scale,
         check_every=check_every,
         objective_stride=objective_stride,
-        reference_objective=reference_result.objective,
+        reference_objective=reference_objective,
         precond=precond_data if precond != "none" else None,
     )
 
-    return result, precond_data, lp, reference_result
+    return result, precond_data, lp, reference_objective
 
 
 def run_pdlp(
@@ -64,15 +56,12 @@ def run_pdlp(
     precond: PrecondMethod = "ruiz_pc",
     precond_tol: float = 1e-2,
     precond_iters: int = 10,
-    ref_solver: ReferenceSolver = "highs",
-    ref_verbose: bool = False,
-) -> tuple[PDLPResult, PreconditionerData, LPData, HighsResult]:
+    beta_params: Optional[Dict[str, float]] = None,
+    restart_mode: str = "normalized_gap",
+    kkt_params: Optional[Dict[str, float]] = None,
+) -> tuple[PDLPResult, PreconditionerData, LPData, float]:
     path = Path(case_path).expanduser().resolve()
-    reference_result = solve_lp_reference(
-        str(path),
-        solver=ref_solver,
-        log_to_console=ref_verbose,
-    )
+    reference_objective = get_reference_objective(str(path))
     lp = read_mps(str(path))
     lp_scaled, precond_data = apply_preconditioner(
         lp,
@@ -88,11 +77,14 @@ def run_pdlp(
         tol=tol,
         check_every=check_every,
         objective_stride=objective_stride,
-        reference_objective=reference_result.objective,
+        reference_objective=reference_objective,
         precond=precond_data if precond != "none" else None,
+        beta_params=beta_params,
+        restart_mode=restart_mode,
+        kkt_params=kkt_params,
     )
 
-    return result, precond_data, lp, reference_result
+    return result, precond_data, lp, reference_objective
 
 
 def resolve_case_paths(target: Path) -> list[Path]:
@@ -123,4 +115,4 @@ def _is_supported_case(path: Path) -> bool:
     return len(suffixes) >= 2 and suffixes[-2:] == [".mps", ".bz2"]
 
 
-__all__ = ["run_pdhg", "run_pdlp", "ReferenceSolver", "resolve_case_paths"]
+__all__ = ["run_pdhg", "run_pdlp", "resolve_case_paths"]

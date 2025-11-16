@@ -3,18 +3,13 @@ import os
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterator, Tuple
 
 import numpy as np
+import pandas as pd
 from highspy import Highs, HighsStatus, ObjSense, HighsVarType  # type: ignore[import]
-
-try:
-    import gurobipy as gp
-    from gurobipy import GRB
-except ModuleNotFoundError:  # pragma: no cover - optional dependency
-    gp = None
-    GRB = None
 
 
 @dataclass
@@ -32,14 +27,6 @@ class LPData:
     m_eq: int
     m_ineq: int
     n_vars: int
-
-
-@dataclass
-class HighsResult:
-    """Optimal solution reported by HiGHS."""
-
-    x: np.ndarray
-    objective: float
 
 
 @contextmanager
@@ -152,6 +139,45 @@ def _load_highs_model(path: str) -> Tuple[Highs, LPData]:
     return highs, lp_data
 
 
+REFERENCE_CSV = Path(__file__).parent / "lp_cases" / "mps_compare_output.csv"
+
+
+def _instance_name_from_path(path: str) -> str:
+    name = Path(path).name
+    for suffix in (".bz2", ".gz", ".zip"):
+        if name.lower().endswith(suffix):
+            name = name[: -len(suffix)]
+    if name.lower().endswith(".mps"):
+        name = name[: -len(".mps")]
+    return name
+
+
+@lru_cache(maxsize=1)
+def _reference_objective_series() -> pd.Series:
+    if not REFERENCE_CSV.exists():
+        raise FileNotFoundError(f"Reference CSV not found at {REFERENCE_CSV}")
+    df = pd.read_csv(REFERENCE_CSV)
+    if "Name" not in df.columns or "Gurobi Optimal Value" not in df.columns:
+        raise ValueError(
+            "CSV must contain 'Name' and 'Gurobi Optimal Value' columns."
+        )
+    df["Name"] = df["Name"].astype(str).str.strip()
+    df = df[df["Name"] != ""]
+    df = df.dropna(subset=["Gurobi Optimal Value"])
+    if df.empty:
+        raise ValueError(f"No reference objectives parsed from {REFERENCE_CSV}")
+    return df.set_index("Name")["Gurobi Optimal Value"].astype(float)
+
+
+def get_reference_objective(path: str) -> float:
+    """Return the reference objective value for the instance referenced by path."""
+    instance = _instance_name_from_path(path)
+    series = _reference_objective_series()
+    if instance not in series:
+        raise KeyError(f"No reference objective found for instance '{instance}'.")
+    return float(series[instance])
+
+
 def read_mps(path: str) -> LPData:
     """Load an LP from an MPS file and convert it to dense canonical form."""
     highs, lp_data = _load_highs_model(path)
@@ -159,75 +185,7 @@ def read_mps(path: str) -> LPData:
     return lp_data
 
 
-def solve_with_highs(
-    path: str,
-    *,
-    log_to_console: bool = False,
-) -> HighsResult:
-    """Solve the LP in the provided MPS file with HiGHS, printing logs to stdout when enabled."""
-    highs, lp_data = _load_highs_model(path)
-    highs.setOptionValue("output_flag", bool(log_to_console))
-    run_status = highs.run()
-    if run_status != HighsStatus.kOk:
-        highs.clear()
-        raise RuntimeError(f"HiGHS failed to solve model: status {run_status}.")
-
-    solution = highs.getSolution()
-    x = np.asarray(solution.col_value, dtype=float)
-    objective = float(lp_data.c @ x + lp_data.obj_offset)
-    highs.clear()
-    return HighsResult(x=x, objective=objective)
-
-def solve_with_gurobi(
-    path: str,
-    *,
-    log_to_console: bool = False,
-) -> HighsResult:
-    """Solve the LP in the provided MPS file with Gurobi, printing logs to stdout when enabled."""
-    if gp is None or GRB is None:
-        raise ImportError(
-            "gurobipy is not installed. Install Gurobi's Python bindings or select --ref-solver highs."
-        )
-
-    # Load model from MPS file
-    model = gp.read(path)
-    model_relaxed = model.relax()
-    model_relaxed.Params.OutputFlag = 1 if log_to_console else 0
-    model_relaxed.optimize()
-    if model_relaxed.Status not in [GRB.OPTIMAL, GRB.SUBOPTIMAL]:
-        model_relaxed.dispose()
-        raise RuntimeError(f"Gurobi failed to solve model: status {model_relaxed.Status}.")
-
-    # Map results to dense x (with bounds) via LPData
-    _, lp_data = _load_highs_model(path)  # To get mapping/order and objective coeffs
-    x_vars = []
-    for var in model_relaxed.getVars():
-        x_vars.append(var.X)
-    x = np.asarray(x_vars, dtype=float)
-    objective = float(lp_data.c @ x + lp_data.obj_offset)
-    model_relaxed.dispose()
-    return HighsResult(x=x, objective=objective)
-
-def solve_lp_reference(
-    path: str,
-    *,
-    solver: str = "highs",
-    log_to_console: bool = False,
-) -> HighsResult:
-    """Solve the LP in the provided MPS file with the selected solver (HiGHS or Gurobi)."""
-    if solver.lower() == "highs":
-        return solve_with_highs(path, log_to_console=log_to_console)
-    elif solver.lower() == "gurobi":
-        return solve_with_gurobi(path, log_to_console=log_to_console)
-    else:
-        raise ValueError(f"Unknown solver '{solver}'. Use 'highs' or 'gurobi'.")
-
-
 __all__ = [
     "LPData",
-    "HighsResult",
     "read_mps",
-    "solve_with_highs",
-    "solve_with_gurobi",
-    "solve_lp_reference",
 ]

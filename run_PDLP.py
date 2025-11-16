@@ -2,19 +2,18 @@ import argparse
 import csv
 from datetime import datetime
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional, Dict
 
 from algo_PDLP import PDLPResult
-from main import ReferenceSolver, resolve_case_paths, run_pdlp
-from mps_process import HighsResult
+from main import resolve_case_paths, run_pdlp
 
 
-def _print_summary(case_path: Path, reference: HighsResult, result: PDLPResult) -> None:
+def _print_summary(case_path: Path, reference: float, result: PDLPResult) -> None:
     print(f"=== PDLP Summary: {case_path.name} ===")
-    print(f"Reference objective : {reference.objective:.6f}")
+    print(f"Reference objective : {reference:.6f}")
     print(f"PDLP objective      : {result.objective:.6f}")
     print(f"Dual objective      : {result.dual_objective:.6f}")
-    print(f"Objective gap       : {result.objective - reference.objective:.3e}")
+    print(f"Objective gap       : {result.objective - reference:.3e}")
     print(f"Duality gap         : {result.duality_gap:.3e}")
     print(f"Primal residual     : {result.primal_residual:.3e}")
     print(f"Dual residual       : {result.dual_residual:.3e}")
@@ -42,10 +41,11 @@ def _collect_case_results(
     precond: str,
     precond_tol: float,
     precond_iters: int,
-    ref_solver: ReferenceSolver,
-    ref_verbose: bool,
-) -> List[Tuple[Path, PDLPResult, HighsResult]]:
-    case_results: List[Tuple[Path, PDLPResult, HighsResult]] = []
+    beta_params: Optional[Dict[str, float]] = None,
+    restart_mode: str = "normalized_gap",
+    kkt_params: Optional[Dict[str, float]] = None,
+) -> List[Tuple[Path, PDLPResult, float]]:
+    case_results: List[Tuple[Path, PDLPResult, float]] = []
     for case_path in cases:
         result, _, _, reference = run_pdlp(
             str(case_path),
@@ -57,8 +57,9 @@ def _collect_case_results(
             precond=precond,  # type: ignore[arg-type]
             precond_tol=precond_tol,
             precond_iters=precond_iters,
-            ref_solver=ref_solver,
-            ref_verbose=ref_verbose,
+            beta_params=beta_params,
+            restart_mode=restart_mode,
+            kkt_params=kkt_params,
         )
         case_results.append((case_path, result, reference))
     return case_results
@@ -89,18 +90,6 @@ def main() -> int:
     parser.add_argument("--precond-tol", type=float, default=1e-2)
     parser.add_argument("--precond-iters", type=int, default=10)
     parser.add_argument(
-        "--ref-solver",
-        type=str,
-        default="highs",
-        choices=["highs", "gurobi"],
-        help="Reference solver for objective comparison (default: highs).",
-    )
-    parser.add_argument(
-        "--ref-verbose",
-        action="store_true",
-        help="Stream reference solver logs to stdout.",
-    )
-    parser.add_argument(
         "--output-root",
         type=Path,
         default=Path("output"),
@@ -110,6 +99,49 @@ def main() -> int:
         "--verbose",
         action="store_true",
         help="Print per-case PDLP summaries.",
+    )
+    parser.add_argument(
+        "--beta-sufficient",
+        type=float,
+        default=None,
+        help="Beta parameter for sufficient decay restart (default: 0.9).",
+    )
+    parser.add_argument(
+        "--beta-necessary",
+        type=float,
+        default=None,
+        help="Beta parameter for necessary decay restart (default: 0.1).",
+    )
+    parser.add_argument(
+        "--beta-artificial",
+        type=float,
+        default=None,
+        help="Beta parameter for artificial restart (default: 0.5).",
+    )
+    parser.add_argument(
+        "--restart-mode",
+        type=str,
+        default="normalized_gap",
+        choices=["normalized_gap", "kkt"],
+        help='Restart module to use: "normalized_gap" (default) or "kkt".',
+    )
+    parser.add_argument(
+        "--kkt-sufficient",
+        type=float,
+        default=None,
+        help="KKT sufficient decay threshold (default: 0.2).",
+    )
+    parser.add_argument(
+        "--kkt-necessary",
+        type=float,
+        default=None,
+        help="KKT necessary decay threshold (default: 0.8).",
+    )
+    parser.add_argument(
+        "--kkt-artificial",
+        type=float,
+        default=None,
+        help="KKT artificial long-inner threshold (default: 0.36).",
     )
     args = parser.parse_args()
 
@@ -127,6 +159,29 @@ def main() -> int:
     print(f"PDLP run started at {timestamp}")
     print(f"Cases discovered: {len(case_paths)}")
     print(f"Output directory: {output_dir}")
+    
+    # Build beta_params dict if any beta parameter is provided
+    beta_params = None
+    if args.beta_sufficient is not None or args.beta_necessary is not None or args.beta_artificial is not None:
+        beta_params = {}
+        if args.beta_sufficient is not None:
+            beta_params["sufficient"] = args.beta_sufficient
+        if args.beta_necessary is not None:
+            beta_params["necessary"] = args.beta_necessary
+        if args.beta_artificial is not None:
+            beta_params["artificial"] = args.beta_artificial
+        print(f"Beta parameters: {beta_params}")
+    # Build kkt_params dict if any kkt parameter is provided
+    kkt_params = None
+    if args.kkt_sufficient is not None or args.kkt_necessary is not None or args.kkt_artificial is not None:
+        kkt_params = {}
+        if args.kkt_sufficient is not None:
+            kkt_params["sufficient"] = args.kkt_sufficient
+        if args.kkt_necessary is not None:
+            kkt_params["necessary"] = args.kkt_necessary
+        if args.kkt_artificial is not None:
+            kkt_params["artificial"] = args.kkt_artificial
+        print(f"KKT parameters: {kkt_params}")
     print()
 
     case_results = _collect_case_results(
@@ -139,8 +194,9 @@ def main() -> int:
         precond=args.precond,
         precond_tol=args.precond_tol,
         precond_iters=args.precond_iters,
-        ref_solver=args.ref_solver,
-        ref_verbose=args.ref_verbose,
+        beta_params=beta_params,
+        restart_mode=args.restart_mode,
+        kkt_params=kkt_params,
     )
 
     for case_path, result, _ in case_results:
@@ -159,7 +215,7 @@ def main() -> int:
         records = [
             {
                 "case": str(case_path),
-                "reference_objective": reference.objective,
+                "reference_objective": reference,
                 "objective": result.objective,
                 "k_multiplications": result.k_multiplications,
                 "outer_iterations": result.outer_iterations,
@@ -188,14 +244,15 @@ def main() -> int:
 
     for case_path, result, reference in case_results:
         print(
-            f"{case_path.name}: ref={reference.objective:.6f}, "
-            f"obj={result.objective:.6f}, gap={result.objective - reference.objective:.3e}, "
+            f"{case_path.name}: ref={reference:.6f}, "
+            f"obj={result.objective:.6f}, gap={result.objective - reference:.3e}, "
             f"k-mults={result.k_multiplications}, "
             f"outer={result.outer_iterations}, iters={result.iterations}, converged={result.converged}"
         )
     print()
 
-    if args.verbose:
+    # Show verbose output if requested or if only one case
+    if args.verbose or len(case_results) == 1:
         for case_path, result, reference in case_results:
             _print_summary(case_path, reference, result)
 
