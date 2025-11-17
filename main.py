@@ -10,7 +10,7 @@ from typing import Optional, Dict
 def run_pdhg(
     case_path: str,
     *,
-    max_iters: int = 100_000,
+    max_K_multi: int = 100000,
     tol: float = 1e-5,
     omega: float = 1.0,
     eta_scale: float = 0.9,
@@ -19,6 +19,7 @@ def run_pdhg(
     precond: PrecondMethod = "ruiz_pc",
     precond_tol: float = 1e-2,
     precond_iters: int = 10,
+    power_iterations: int = 20,
 ) -> tuple[PDHGResult, PreconditionerData, LPData, float]:
     path = Path(case_path).expanduser().resolve()
     reference_objective = get_reference_objective(str(path))
@@ -32,7 +33,7 @@ def run_pdhg(
 
     result = pdhg(
         lp_scaled,
-        max_iters=max_iters,
+        max_K_multi=max_K_multi,
         tol=tol,
         omega=omega,
         eta_scale=eta_scale,
@@ -40,6 +41,7 @@ def run_pdhg(
         objective_stride=objective_stride,
         reference_objective=reference_objective,
         precond=precond_data if precond != "none" else None,
+        power_iterations=power_iterations,
     )
 
     return result, precond_data, lp, reference_objective
@@ -48,8 +50,7 @@ def run_pdhg(
 def run_pdlp(
     case_path: str,
     *,
-    max_outer: int = 50,
-    max_inner: int = 2000,
+    max_K_multi: int = 100000,
     tol: float = 1e-6,
     check_every: int = 50,
     objective_stride: int = 0,
@@ -59,6 +60,8 @@ def run_pdlp(
     beta_params: Optional[Dict[str, float]] = None,
     restart_mode: str = "normalized_gap",
     kkt_params: Optional[Dict[str, float]] = None,
+    enable_adaptive_step: bool = True,
+    enable_primal_weight: bool = True,
 ) -> tuple[PDLPResult, PreconditionerData, LPData, float]:
     path = Path(case_path).expanduser().resolve()
     reference_objective = get_reference_objective(str(path))
@@ -72,8 +75,7 @@ def run_pdlp(
 
     result = pdlp(
         lp_scaled,
-        max_outer=max_outer,
-        max_inner=max_inner,
+        max_K_multi=max_K_multi,
         tol=tol,
         check_every=check_every,
         objective_stride=objective_stride,
@@ -82,6 +84,8 @@ def run_pdlp(
         beta_params=beta_params,
         restart_mode=restart_mode,
         kkt_params=kkt_params,
+        enable_adaptive_step=enable_adaptive_step,
+        enable_primal_weight=enable_primal_weight,
     )
 
     return result, precond_data, lp, reference_objective

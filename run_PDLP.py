@@ -33,8 +33,7 @@ def _print_summary(case_path: Path, reference: float, result: PDLPResult) -> Non
 def _collect_case_results(
     cases: List[Path],
     *,
-    max_outer: int,
-    max_inner: int,
+    max_K_multi: int,
     tol: float,
     check_every: int,
     objective_stride: int,
@@ -49,8 +48,7 @@ def _collect_case_results(
     for case_path in cases:
         result, _, _, reference = run_pdlp(
             str(case_path),
-            max_outer=max_outer,
-            max_inner=max_inner,
+            max_K_multi=max_K_multi,
             tol=tol,
             check_every=check_every,
             objective_stride=objective_stride,
@@ -71,8 +69,7 @@ def main() -> int:
         "target",
         help="Path to a .mps/.mps.bz2 file or a directory containing such files.",
     )
-    parser.add_argument("--max-outer", type=int, default=50)
-    parser.add_argument("--max-inner", type=int, default=2000)
+    parser.add_argument("--max-K-multi", type=int, default=100000, dest="max_K_multi")
     parser.add_argument("--tol", type=float, default=1e-6)
     parser.add_argument("--check-every", type=int, default=50)
     parser.add_argument(
@@ -186,8 +183,7 @@ def main() -> int:
 
     case_results = _collect_case_results(
         case_paths,
-        max_outer=args.max_outer,
-        max_inner=args.max_inner,
+        max_K_multi=args.max_K_multi,
         tol=args.tol,
         check_every=args.check_every,
         objective_stride=args.objective_stride,

@@ -30,7 +30,7 @@ def _print_summary(case_path: Path, reference: float, result: PDHGResult) -> Non
 def _collect_case_results(
     cases: List[Path],
     *,
-    max_iters: int,
+    max_K_multi: int,
     tol: float,
     omega: float,
     eta_scale: float,
@@ -44,7 +44,7 @@ def _collect_case_results(
     for case_path in cases:
         result, _, _, reference = run_pdhg(
             str(case_path),
-            max_iters=max_iters,
+            max_K_multi=max_K_multi,
             tol=tol,
             omega=omega,
             eta_scale=eta_scale,
@@ -53,6 +53,7 @@ def _collect_case_results(
             precond=precond,  # type: ignore[arg-type]
             precond_tol=precond_tol,
             precond_iters=precond_iters,
+            power_iterations=20,  # Default value for backward compatibility
         )
         case_results.append((case_path, result, reference))
     return case_results
@@ -64,7 +65,7 @@ def main() -> int:
         "target",
         help="Path to a .mps/.mps.bz2 file or a directory containing such files.",
     )
-    parser.add_argument("--max-iters", type=int, default=100_000)
+    parser.add_argument("--max-K-multi", type=int, default=100000, dest="max_K_multi")
     parser.add_argument("--tol", type=float, default=1e-5)
     parser.add_argument("--omega", type=float, default=1.0)
     parser.add_argument("--eta-scale", type=float, default=0.9)
@@ -114,7 +115,7 @@ def main() -> int:
 
     case_results = _collect_case_results(
         case_paths,
-        max_iters=args.max_iters,
+        max_K_multi=args.max_K_multi,
         tol=args.tol,
         omega=args.omega,
         eta_scale=args.eta_scale,

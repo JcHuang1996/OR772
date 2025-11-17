@@ -48,19 +48,22 @@ class PDLPResult:
 def pdlp(
     lp: LPData,
     *,
-    max_outer: int = 50,
-    max_inner: int = 2000,
+    max_K_multi: int = 100000,
+    max_outer: int = 1000000,  # Large default to avoid bounding outer loops
+    max_inner: int = 1000000,  # Large default (effectively unbounded)
     tol: float = 1e-6,
     beta_params: Optional[Dict[str, float]] = None,
     kkt_params: Optional[Dict[str, float]] = None,
     eta0_scale: float = 1.0,
     theta_weight: float = 0.5,
     eps_zero: float = 1e-12,
-    check_every: int = 50,
+    check_every: int = 100,
     objective_stride: int = 0,
     reference_objective: Optional[float] = None,
     precond: Optional[PreconditionerData] = None,
     restart_mode: str = "normalized_gap",  # "normalized_gap" or "kkt"
+    enable_adaptive_step: bool = True,
+    enable_primal_weight: bool = True,
 ) -> PDLPResult:
     """Run PDLP with adaptive modules."""
     if max_outer <= 0 or max_inner <= 0:
@@ -96,14 +99,23 @@ def pdlp(
         stride=objective_stride,
     )
 
-    # Step size initialization
+    # Step size initialization - disable counting for spectral norm estimation
+    tracker.disable_counting()
     spectral_norm = estimate_spectral_norm(K, matvec_callback=lambda: tracker.bump())
     norm_inf = np.linalg.norm(K, ord=np.inf)
     norm_bound = max(spectral_norm, norm_inf, 1e-6)
     eta_hat = eta0_scale / norm_bound # eta0_scale = 1 in the original implementation
 
+    # Compute fixed step size for non-adaptive mode (0.9 / 2-norm of K)
+    norm_K_2 = estimate_spectral_norm(K)
+    eta_fixed = 0.9 / max(norm_K_2, 1e-8)
+    tracker.enable_counting()
+
     # Primal weight initialization
-    omega = _initialize_primal_weight(lp.c, q, eps_zero)
+    if enable_primal_weight:
+        omega = _initialize_primal_weight(lp.c, q, eps_zero)
+    else:
+        omega = 1.0
 
     x = np.clip(np.zeros(n, dtype=float), lp.lower, lp.upper)
     y = np.zeros(m_total, dtype=float)
@@ -140,9 +152,12 @@ def pdlp(
     outer_iterations = 0
 
     # compute the backup step size for the inner iteration if the denominator is < 0 or the numerator is 0
+    # Disable counting for backup step size computation
+    tracker.disable_counting()
     norm_K = estimate_spectral_norm(K)
     denom_backup = max(norm_K, 1e-8)
     eta_backup = 0.9 / denom_backup
+    tracker.enable_counting()
 
     for epoch in range(max_outer):
 
@@ -158,6 +173,8 @@ def pdlp(
 
         # computing the \mu_n(z^{n,0}, z^{n-1,0}) in the paper.
         # i.e. the normalized gap between the current and previous starting points of the outer iteration
+        # Disable counting for restart metric computation (statistics)
+        tracker.disable_counting()
         if restart_mode == "normalized_gap":
             mu_prev_epoch = (
                 _normalized_gap(
@@ -178,21 +195,44 @@ def pdlp(
             # KKT-based restart: compute K0 for this epoch
             K0 = _kkt_error(lp, z_start, omega, K=K, q=q)
             mu_prev_epoch = np.inf
+        tracker.enable_counting()
 
         while t < max_inner:    # typically, the max_inner should not be reached due to the long inner loop restart criteria. Just in case.
+            # Check max_K_multi before optimization step (each step does 2 K-mults: K and K.T)
+            if tracker.count >= max_K_multi:
+                break
+            
             # start of the inner iteration
             iterations += 1
-            z_next, eta_accepted, eta_hat = _adaptive_step_of_pdhg(
-                lp=lp,
-                q=q,
-                omega=omega,
-                eta_hat=eta_hat,
-                k=iterations,
-                z=z_curr,
-                apply_K=apply_K,
-                apply_K_transpose=apply_K_transpose,
-                eta_backup=eta_backup
-            )
+            if enable_adaptive_step:
+                z_next, eta_accepted, eta_hat = _adaptive_step_of_pdhg(
+                    lp=lp,
+                    q=q,
+                    omega=omega,
+                    eta_hat=eta_hat,
+                    k=iterations,
+                    z=z_curr,
+                    apply_K=apply_K,
+                    apply_K_transpose=apply_K_transpose,
+                    eta_backup=eta_backup
+                )
+            else:
+                z_next, eta_accepted, eta_hat = _fixed_step_of_pdhg(
+                    lp=lp,
+                    q=q,
+                    omega=omega,
+                    eta=eta_fixed,
+                    z=z_curr,
+                    apply_K=apply_K,
+                    apply_K_transpose=apply_K_transpose,
+                )
+            
+            # Check max_K_multi right after optimization step (in case we went slightly over)
+            if tracker.count >= max_K_multi:
+                z_curr = z_next
+                converged = False  # Mark as not converged since we hit the limit
+                break
+            
             # Minimal tracking hook for accepted steps (enable by setting env PDLP_DEBUG_STEP=1)
             if os.environ.get("PDLP_DEBUG_STEP", ""):
                 try:
@@ -221,6 +261,8 @@ def pdlp(
                 z_avg = (z_next[0].copy(), z_next[1].copy())
 
             # get the restart candidate
+            # Disable counting for restart candidate computation (statistics)
+            tracker.disable_counting()
             if restart_mode == "normalized_gap":
                 z_candidate = _get_restart_candidate(
                     lp=lp,
@@ -242,8 +284,11 @@ def pdlp(
                     K=K,
                     q=q,
                 )
+            tracker.enable_counting()
 
             # compute the restart metric for decision
+            # Disable counting for restart metric computation (statistics)
+            tracker.disable_counting()
             if restart_mode == "normalized_gap":
                 # mu_candidate is \mu_n(z_{c}^{n,t+1}, z^{n,0}) in the paper
                 mu_candidate = _normalized_gap(
@@ -261,8 +306,11 @@ def pdlp(
                 # KKT-based metric
                 K_c = _kkt_error(lp, z_candidate, omega, K=K, q=q)
                 mu_candidate = np.inf
+            tracker.enable_counting()
 
             if iterations % check_every == 0:
+                # Disable counting for metrics evaluation (statistics/convergence)
+                tracker.disable_counting()
                 metrics = _evaluate_metrics(
                     lp,
                     z_candidate,
@@ -274,6 +322,7 @@ def pdlp(
                     K=K,
                     q=q,
                 )
+                tracker.enable_counting()
                 objective_history.append(metrics.objective)
                 dual_objective_history.append(metrics.dual_objective)
                 duality_gap_history.append(metrics.duality_gap)
@@ -319,20 +368,27 @@ def pdlp(
                 mu_candidate_prev = mu_candidate
             else:
                 K_candidate_prev = K_c
+        
+        # Check max_K_multi after inner loop (in case we exited due to restart)
+        if tracker.count >= max_K_multi:
+            break
 
         if converged:
             break
 
         z_prev_start = z_start
         z_curr = z_candidate_prev
-        omega = _primal_weight_update(
-            z_curr=z_curr,
-            z_prev=z_prev_start,
-            omega_prev=omega,
-            theta=theta_weight,
-            eps_zero=eps_zero,
-        )
+        if enable_primal_weight:
+            omega = _primal_weight_update(
+                z_curr=z_curr,
+                z_prev=z_prev_start,
+                omega_prev=omega,
+                theta=theta_weight,
+                eps_zero=eps_zero,
+            )
 
+    # Disable counting for final metrics evaluation (statistics)
+    tracker.disable_counting()
     final_metrics = _evaluate_metrics(
         lp,
         z_curr,
@@ -344,6 +400,7 @@ def pdlp(
         K=K,
         q=q,
     )
+    tracker.enable_counting()
 
     if not objective_history:
         objective_history.append(final_metrics.objective)
@@ -441,6 +498,29 @@ def _adaptive_step_of_pdhg(
             return (x_next, y_next), eta, eta_next
 
         eta = float(eta_next)
+
+
+def _fixed_step_of_pdhg(
+    *,
+    lp: LPData,
+    q: np.ndarray,
+    omega: float,
+    eta: float,
+    z: Tuple[np.ndarray, np.ndarray],
+    apply_K: Callable[[np.ndarray, Optional[np.ndarray]], np.ndarray],
+    apply_K_transpose: Callable[[np.ndarray, Optional[np.ndarray]], np.ndarray],
+) -> Tuple[Tuple[np.ndarray, np.ndarray], float, float]:
+    """Fixed step size PDHG step (used when adaptive step is disabled)."""
+    x, y = z
+    grad = lp.c - apply_K_transpose(y, sample_primal=None)
+    x_next = proj_box(x - (eta / omega) * grad, lp.lower, lp.upper)
+    x_bar = 2.0 * x_next - x
+    y_next = proj_dual(
+        y + (eta * omega) * (q - apply_K(x_bar, sample_primal=None)),
+        lp.m_ineq,
+    )
+    # For fixed step, eta_accepted and eta_hat are both the fixed eta
+    return (x_next, y_next), eta, eta
 
 
 def _get_restart_candidate(
@@ -860,6 +940,7 @@ class _KMultiplicationTracker:
         self.reference_objective = reference_objective
         self.stride = stride
         self.count = 0
+        self._count_enabled = True  # Flag to enable/disable counting
         if stride > 0 and reference_objective is not None:
             self._next_checkpoint: Optional[int] = stride
         else:
@@ -867,7 +948,8 @@ class _KMultiplicationTracker:
         self.samples: List[Tuple[int, float]] = []
 
     def bump(self, primal: Optional[np.ndarray] = None, increments: int = 1) -> None:
-        self.count += increments
+        if self._count_enabled:
+            self.count += increments
         if self._next_checkpoint is None or primal is None or self.reference_objective is None:
             return
         while self.count >= self._next_checkpoint:
@@ -875,6 +957,14 @@ class _KMultiplicationTracker:
             distance = abs(objective - self.reference_objective)
             self.samples.append((self._next_checkpoint, distance))
             self._next_checkpoint += self.stride
+
+    def disable_counting(self) -> None:
+        """Disable counting of K-multiplications (for statistics/convergence checks)."""
+        self._count_enabled = False
+
+    def enable_counting(self) -> None:
+        """Enable counting of K-multiplications (for optimization steps)."""
+        self._count_enabled = True
 
 
 def _initialize_primal_weight(c: np.ndarray, q: np.ndarray, eps_zero: float) -> float:

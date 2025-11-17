@@ -31,14 +31,15 @@ class PDHGResult:
 def pdhg(
     lp: LPData,
     *,
-    max_iters: int,
+    max_K_multi: int,
     tol: float,
     omega: float = 1.0,
     eta_scale: float = 0.9,
-    check_every: int = 25,
+    check_every: int = 100,
     objective_stride: int = 0,
     reference_objective: Optional[float] = None,
     precond: Optional[PreconditionerData] = None,
+    power_iterations: int = 20,
 ) -> PDHGResult:
     """Run the Primal-Dual Hybrid Gradient algorithm on the provided LP."""
     n = lp.n_vars
@@ -61,7 +62,7 @@ def pdhg(
     else:
         K = np.zeros((0, n), dtype=float)
 
-    q = np.concatenate([lp.h, lp.b]) if m_total else np.zeros((0,), dtype=float)
+    q = np.concatenate([lp.h, lp.b])
 
     tracker = _KMultiplicationTracker(
         lp=lp,
@@ -69,7 +70,10 @@ def pdhg(
         stride=objective_stride,
     )
 
-    norm_K = estimate_spectral_norm(K, matvec_callback=lambda: tracker.bump())
+    # Disable counting for spectral norm estimation (preconditioning/initialization)
+    tracker.disable_counting()
+    norm_K = estimate_spectral_norm(K, iters=power_iterations, matvec_callback=lambda: tracker.bump())
+    tracker.enable_counting()
     denom = max(norm_K, 1e-8)
     eta = eta_scale / denom
     tau = eta / omega
@@ -79,8 +83,6 @@ def pdhg(
     y = np.zeros(m_total, dtype=float)
 
     def apply_K(vec: np.ndarray, *, sample_primal: Optional[np.ndarray] = None) -> np.ndarray:
-        if not m_total:
-            return np.zeros((0,), dtype=float)
         result = K @ vec
         tracker.bump(sample_primal)
         return result
@@ -88,8 +90,6 @@ def pdhg(
     def apply_K_transpose(
         vec: np.ndarray, *, sample_primal: Optional[np.ndarray] = None
     ) -> np.ndarray:
-        if not m_total:
-            return np.zeros(n, dtype=float)
         result = K.T @ vec
         tracker.bump(sample_primal)
         return result
@@ -99,9 +99,11 @@ def pdhg(
     dual_residual_history: List[float] = []
 
     converged = False
-    iterations = max_iters
+    iterations = 0
 
-    for k in range(1, max_iters + 1):
+    k = 0
+    while tracker.count < max_K_multi:
+        k += 1
         x_prev = x.copy()
         grad = lp.c - apply_K_transpose(y, sample_primal=None) if m_total else lp.c
         x = proj_box(x_prev - tau * grad, lp.lower, lp.upper)
@@ -113,13 +115,21 @@ def pdhg(
                 lp.m_ineq,
             )
 
-        if k % check_every == 0 or k == max_iters:
+        # Check if we've exceeded max_K_multi after the optimization step
+        if tracker.count >= max_K_multi:
+            iterations = k
+            break
+
+        if k % check_every == 0:
+            # Disable counting for residual computation (statistics)
+            tracker.disable_counting()
             primal_residual, dual_residual = _compute_residuals(
                 lp,
                 x,
                 y,
                 lambda vec: apply_K_transpose(vec, sample_primal=x),
             )
+            tracker.enable_counting()
             primal_residual_history.append(primal_residual)
             dual_residual_history.append(dual_residual)
             objective = float(lp.c @ x + lp.obj_offset)
@@ -132,12 +142,15 @@ def pdhg(
     if not objective_history:
         objective = float(lp.c @ x + lp.obj_offset)
         objective_history.append(objective)
+        # Disable counting for final residual computation
+        tracker.disable_counting()
         primal_residual, dual_residual = _compute_residuals(
             lp,
             x,
             y,
             lambda vec: apply_K_transpose(vec, sample_primal=x),
         )
+        tracker.enable_counting()
         primal_residual_history.append(primal_residual)
         dual_residual_history.append(dual_residual)
     else:
@@ -211,6 +224,7 @@ class _KMultiplicationTracker:
         self.reference_objective = reference_objective
         self.stride = stride
         self.count = 0
+        self._count_enabled = True  # Flag to enable/disable counting
         if stride > 0 and reference_objective is not None:
             self._next_checkpoint: Optional[int] = stride
         else:
@@ -218,7 +232,8 @@ class _KMultiplicationTracker:
         self.samples: List[Tuple[int, float]] = []
 
     def bump(self, primal: Optional[np.ndarray] = None, increments: int = 1) -> None:
-        self.count += increments
+        if self._count_enabled:
+            self.count += increments
         if self._next_checkpoint is None or primal is None or self.reference_objective is None:
             return
         while self.count >= self._next_checkpoint:
@@ -226,6 +241,14 @@ class _KMultiplicationTracker:
             distance = abs(objective - self.reference_objective)
             self.samples.append((self._next_checkpoint, distance))
             self._next_checkpoint += self.stride
+
+    def disable_counting(self) -> None:
+        """Disable counting of K-multiplications (for statistics/convergence checks)."""
+        self._count_enabled = False
+
+    def enable_counting(self) -> None:
+        """Enable counting of K-multiplications (for optimization steps)."""
+        self._count_enabled = True
 
 
 __all__ = ["PDHGResult", "pdhg"]
