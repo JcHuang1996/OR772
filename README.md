@@ -38,6 +38,50 @@ python run_PDLP.py lp_cases/ --objective-stride 25
 
 Algorithm-specific parameters are still available (`--max-iters`, `--omega`, `--check-every`, `--max-inner`, `--max-outer`, …).
 
+## Running Experiments
+
+The `run_experiments.py` script provides a framework for running systematic numerical experiments on PDHG and PDLP algorithms.
+
+### PDLP Module Experiments
+
+Run all three PDLP module experiments (restart + adaptive step size; restart + primal weight update; all modules) with merged output generation:
+
+```bash
+python run_experiments.py --algorithm pdlp --experiment-type restart_primal_weight --cases-folder lp_cases/netlib_exp && python run_experiments.py --algorithm pdlp --experiment-type restart_adaptive_step --cases-folder lp_cases/netlib_exp && python run_experiments.py --algorithm pdlp --experiment-type restart_all_modules --cases-folder lp_cases/netlib_exp
+```
+
+Or run them individually (merged plots are generated automatically when all three complete):
+
+```bash
+python run_experiments.py --algorithm pdlp --experiment-type restart_primal_weight --cases-folder lp_cases/netlib_exp
+python run_experiments.py --algorithm pdlp --experiment-type restart_adaptive_step --cases-folder lp_cases/netlib_exp
+python run_experiments.py --algorithm pdlp --experiment-type restart_all_modules --cases-folder lp_cases/netlib_exp
+```
+
+### PDLP Parameter Grid Search Experiments
+
+Run a grid search experiment for PDLP restart parameters:
+
+```bash
+# Grid search over "necessary" parameter
+python run_experiments.py --algorithm pdlp --experiment-type grid_search_necessary --cases-folder lp_cases/netlib_exp
+
+# Grid search over "artificial" parameter
+python run_experiments.py --algorithm pdlp --experiment-type grid_search_artificial --cases-folder lp_cases/netlib_exp
+
+# Grid search over "sufficient" parameter
+python run_experiments.py --algorithm pdlp --experiment-type grid_search_sufficient --cases-folder lp_cases/netlib_exp
+```
+
+**Customizing grid search parameters:**
+- `--kkt-necessary`: necessary parameter values (default: `0.7 0.75 0.8 0.85 0.9 0.95`)
+- `--kkt-artificial`: artificial parameter values (default: `0.16 0.26 0.36 0.46 0.56`)
+- `--kkt-sufficient`: sufficient parameter values (default: `0.1 0.15 0.2 0.25 0.3`)
+- `--tolerances`: tolerance values (default: `1e-4 1e-8`)
+- `--max-K-multi`: maximum K-multiplications (default: `100000`)
+
+All experiment outputs are saved in timestamped directories under the `output/` folder.
+
 ### Outputs
 
 ```text
