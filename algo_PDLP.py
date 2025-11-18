@@ -100,6 +100,7 @@ def pdlp(
     )
 
     # Step size initialization - disable counting for spectral norm estimation
+    # Cache spectral norm to avoid recomputing it multiple times
     tracker.disable_counting()
     spectral_norm = estimate_spectral_norm(K, matvec_callback=lambda: tracker.bump())
     norm_inf = np.linalg.norm(K, ord=np.inf)
@@ -107,7 +108,8 @@ def pdlp(
     eta_hat = eta0_scale / norm_bound # eta0_scale = 1 in the original implementation
 
     # Compute fixed step size for non-adaptive mode (0.9 / 2-norm of K)
-    norm_K_2 = estimate_spectral_norm(K)
+    # Reuse cached spectral_norm instead of recomputing
+    norm_K_2 = spectral_norm
     eta_fixed = 0.9 / max(norm_K_2, 1e-8)
     tracker.enable_counting()
 
@@ -152,12 +154,11 @@ def pdlp(
     outer_iterations = 0
 
     # compute the backup step size for the inner iteration if the denominator is < 0 or the numerator is 0
-    # Disable counting for backup step size computation
-    tracker.disable_counting()
-    norm_K = estimate_spectral_norm(K)
+    # Reuse cached spectral_norm instead of recomputing
+    norm_K = spectral_norm  # Reuse cached value
     denom_backup = max(norm_K, 1e-8)
     eta_backup = 0.9 / denom_backup
-    tracker.enable_counting()
+
 
     for epoch in range(max_outer):
 
@@ -888,7 +889,8 @@ def _evaluate_metrics(
     else:
         reduced_cost = lp.c.copy()
     lam = project_lambda(reduced_cost, lp.lower, lp.upper)
-    dual_residual_vec = lp.c - (apply_K_transpose(y, sample_primal=x) if K.size else 0.0) - lam
+    # Reuse reduced_cost instead of recomputing apply_K_transpose
+    dual_residual_vec = reduced_cost - lam
     if isinstance(dual_residual_vec, np.ndarray):
         dual_residual = float(np.linalg.norm(dual_residual_vec, ord=2))
     else:

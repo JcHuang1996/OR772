@@ -67,18 +67,24 @@ def weighted_norm(x: np.ndarray, y: np.ndarray, omega: float) -> float:
 
 def project_lambda(v: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> np.ndarray:
     """Project reduced costs onto the dual domain Lambda induced by bounds."""
-    lam = np.zeros_like(v)
-    for i, value in enumerate(v):
-        li = lower[i]
-        ui = upper[i]
-        if not np.isfinite(li) and not np.isfinite(ui):
-            lam[i] = 0.0
-        elif not np.isfinite(li) and np.isfinite(ui):
-            lam[i] = min(value, 0.0)
-        elif np.isfinite(li) and not np.isfinite(ui):
-            lam[i] = max(value, 0.0)
-        else:
-            lam[i] = value
+    # Vectorized implementation for better performance
+    lam = v.copy()
+    
+    # Case 1: both bounds are infinite -> set to 0
+    both_infinite = ~np.isfinite(lower) & ~np.isfinite(upper)
+    lam[both_infinite] = 0.0
+    
+    # Case 2: lower infinite, upper finite -> min(value, 0)
+    lower_inf_upper_finite = ~np.isfinite(lower) & np.isfinite(upper)
+    lam[lower_inf_upper_finite] = np.minimum(lam[lower_inf_upper_finite], 0.0)
+    
+    # Case 3: lower finite, upper infinite -> max(value, 0)
+    lower_finite_upper_inf = np.isfinite(lower) & ~np.isfinite(upper)
+    lam[lower_finite_upper_inf] = np.maximum(lam[lower_finite_upper_inf], 0.0)
+    
+    # Case 4: both finite -> keep value (already copied from v)
+    # No action needed as lam already equals v for these indices
+    
     return lam
 
 
