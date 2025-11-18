@@ -31,6 +31,7 @@ PDLP_EXPERIMENTS = [
     "restart_primal_weight",
     "restart_adaptive_step",
     "restart_all_modules",
+    "module_comparison",  # Runs all three module experiments and generates merged plots
     "grid_search_artificial",
     "grid_search_necessary",
     "grid_search_sufficient",
@@ -249,6 +250,102 @@ def run_single_experiment(
                 enable_adaptive_step=True,
                 enable_primal_weight=True,
             )
+        elif experiment_type == "module_comparison":
+            # Run all three module experiments and generate merged plots
+            print("\n" + "="*60)
+            print("Running module comparison: all three module experiments")
+            print("="*60)
+            
+            all_module_results: Dict[str, List] = {}
+            
+            # Run restart_primal_weight
+            print("\n[1/3] Running restart_primal_weight experiment...")
+            results_primal_weight = run_pdlp_module_experiment(
+                cases_folder,
+                args.tolerances,
+                max_K_multi=args.max_K_multi,
+                check_every=args.check_every,
+                restart_mode="kkt",
+                enable_adaptive_step=False,
+                enable_primal_weight=True,
+            )
+            all_module_results["restart_primal_weight"] = results_primal_weight
+            
+            # Save results for restart_primal_weight
+            subdir_primal = experiment_dir / "restart_primal_weight"
+            subdir_primal.mkdir(parents=True, exist_ok=True)
+            csv_path_primal = subdir_primal / "summary.csv"
+            save_pdlp_experiment_csv(results_primal_weight, csv_path_primal)
+            pickle_path_primal = subdir_primal / "data.pkl"
+            save_experiment_data(results_primal_weight, pickle_path_primal)
+            print(f"Results saved to {subdir_primal}")
+            
+            # Run restart_adaptive_step
+            print("\n[2/3] Running restart_adaptive_step experiment...")
+            results_adaptive_step = run_pdlp_module_experiment(
+                cases_folder,
+                args.tolerances,
+                max_K_multi=args.max_K_multi,
+                check_every=args.check_every,
+                restart_mode="kkt",
+                enable_adaptive_step=True,
+                enable_primal_weight=False,
+            )
+            all_module_results["restart_adaptive_step"] = results_adaptive_step
+            
+            # Save results for restart_adaptive_step
+            subdir_adaptive = experiment_dir / "restart_adaptive_step"
+            subdir_adaptive.mkdir(parents=True, exist_ok=True)
+            csv_path_adaptive = subdir_adaptive / "summary.csv"
+            save_pdlp_experiment_csv(results_adaptive_step, csv_path_adaptive)
+            pickle_path_adaptive = subdir_adaptive / "data.pkl"
+            save_experiment_data(results_adaptive_step, pickle_path_adaptive)
+            print(f"Results saved to {subdir_adaptive}")
+            
+            # Run restart_all_modules
+            print("\n[3/3] Running restart_all_modules experiment...")
+            results_all_modules = run_pdlp_module_experiment(
+                cases_folder,
+                args.tolerances,
+                max_K_multi=args.max_K_multi,
+                check_every=args.check_every,
+                restart_mode="kkt",
+                enable_adaptive_step=True,
+                enable_primal_weight=True,
+            )
+            all_module_results["restart_all_modules"] = results_all_modules
+            
+            # Save results for restart_all_modules
+            subdir_all = experiment_dir / "restart_all_modules"
+            subdir_all.mkdir(parents=True, exist_ok=True)
+            csv_path_all = subdir_all / "summary.csv"
+            save_pdlp_experiment_csv(results_all_modules, csv_path_all)
+            pickle_path_all = subdir_all / "data.pkl"
+            save_experiment_data(results_all_modules, pickle_path_all)
+            print(f"Results saved to {subdir_all}")
+            
+            # Generate merged plots
+            print("\n" + "="*60)
+            print("Generating merged plots for module comparison...")
+            print("="*60)
+            generate_merged_module_plots(
+                all_module_results,
+                cases_folder,
+                experiment_dir,
+                args.tolerances,
+                selected_cases,
+            )
+            
+            # Create a combined summary CSV
+            csv_path = experiment_dir / "summary.csv"
+            save_pdlp_experiment_csv(results_all_modules, csv_path)  # Use all_modules as the main summary
+            print(f"Combined summary CSV saved to {csv_path}")
+            
+            # Return the combined results (using all_modules as representative)
+            results = results_all_modules
+            # Skip normal post-processing since we've already done everything
+            print("✓ Experiment 'module_comparison' completed successfully!")
+            return 0
         elif experiment_type == "grid_search_artificial":
             fixed_params = {"necessary": 0.8, "sufficient": 0.2}
             results = run_pdlp_grid_search_experiment(

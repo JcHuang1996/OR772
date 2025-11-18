@@ -44,18 +44,33 @@ The `run_experiments.py` script provides a framework for running systematic nume
 
 ### PDLP Module Experiments
 
-Run all three PDLP module experiments (restart + adaptive step size; restart + primal weight update; all modules) with merged output generation:
+Run all three PDLP module experiments (restart + adaptive step size; restart + primal weight update; all modules) together with merged output generation:
 
 ```bash
-python run_experiments.py --algorithm pdlp --experiment-type restart_primal_weight --cases-folder lp_cases/netlib_exp && python run_experiments.py --algorithm pdlp --experiment-type restart_adaptive_step --cases-folder lp_cases/netlib_exp && python run_experiments.py --algorithm pdlp --experiment-type restart_all_modules --cases-folder lp_cases/netlib_exp
+python run_experiments.py --algorithm pdlp --experiment-type module_comparison --cases-folder lp_cases/netlib_exp
 ```
 
-Or run them individually (merged plots are generated automatically when all three complete):
+This single command will:
+1. Run all three module experiments sequentially (restart_primal_weight, restart_adaptive_step, restart_all_modules)
+2. Save individual results for each experiment in separate subdirectories
+3. Automatically generate merged comparison plots after all three experiments complete
 
-```bash
-python run_experiments.py --algorithm pdlp --experiment-type restart_primal_weight --cases-folder lp_cases/netlib_exp
-python run_experiments.py --algorithm pdlp --experiment-type restart_adaptive_step --cases-folder lp_cases/netlib_exp
-python run_experiments.py --algorithm pdlp --experiment-type restart_all_modules --cases-folder lp_cases/netlib_exp
+The output structure will be:
+```
+output/PDLP-netlib_exp-{timestamp}/module_comparison/
+  ├── restart_primal_weight/
+  │   ├── summary.csv
+  │   └── data.pkl
+  ├── restart_adaptive_step/
+  │   ├── summary.csv
+  │   └── data.pkl
+  ├── restart_all_modules/
+  │   ├── summary.csv
+  │   └── data.pkl
+  ├── merged_module_plots/
+  │   ├── plot_fraction_tol{...}.png
+  │   └── plot_objective_gap_{case}_tol{...}.png
+  └── summary.csv
 ```
 
 ### PDLP Parameter Grid Search Experiments
