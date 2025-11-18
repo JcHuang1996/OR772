@@ -11,7 +11,6 @@ from lp_precondition import PreconditionerData
 from mps_process import LPData
 from operations import (
     compute_duality_gap,
-    estimate_spectral_norm,
     proj_box,
     proj_dual,
     project_lambda,
@@ -99,19 +98,15 @@ def pdlp(
         stride=objective_stride,
     )
 
-    # Step size initialization - disable counting for spectral norm estimation
-    # Cache spectral norm to avoid recomputing it multiple times
-    tracker.disable_counting()
-    spectral_norm = estimate_spectral_norm(K, matvec_callback=lambda: tracker.bump())
-    norm_inf = np.linalg.norm(K, ord=np.inf)
-    norm_bound = max(spectral_norm, norm_inf, 1e-6)
+    # Step size initialization - use precomputed norms from LPData for reproducibility
+    # Norms are computed during problem loading with fixed seed
+    norm_K_2 = lp.norm_2
+    norm_inf = lp.norm_inf
+    norm_bound = max(norm_K_2, norm_inf, 1e-6)
     eta_hat = eta0_scale / norm_bound # eta0_scale = 1 in the original implementation
 
     # Compute fixed step size for non-adaptive mode (0.9 / 2-norm of K)
-    # Reuse cached spectral_norm instead of recomputing
-    norm_K_2 = spectral_norm
     eta_fixed = 0.9 / max(norm_K_2, 1e-8)
-    tracker.enable_counting()
 
     # Primal weight initialization
     if enable_primal_weight:
@@ -154,9 +149,8 @@ def pdlp(
     outer_iterations = 0
 
     # compute the backup step size for the inner iteration if the denominator is < 0 or the numerator is 0
-    # Reuse cached spectral_norm instead of recomputing
-    norm_K = spectral_norm  # Reuse cached value
-    denom_backup = max(norm_K, 1e-8)
+    # Use precomputed norm_2 from LPData
+    denom_backup = max(norm_K_2, 1e-8)
     eta_backup = 0.9 / denom_backup
 
 

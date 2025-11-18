@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 
 from algo_PDHG import PDHGResult
 from algo_PDLP import PDLPResult
-from main import resolve_case_paths, run_pdhg, run_pdlp
+from main import resolve_case_paths, run_pdhg, run_pdlp, preload_cases
 
 
 def sgm10(data: List[float]) -> float:
@@ -280,7 +280,14 @@ def run_pdlp_module_experiment(
     objective_stride: int = 50,
 ) -> List[PDLPExperimentResult]:
     """Run PDLP module combination experiment."""
-    case_paths = resolve_case_paths(cases_folder)
+    # Preload all cases once at the beginning
+    preprocessed_cases = preload_cases(
+        cases_folder,
+        precond=precond,
+        precond_tol=precond_tol,
+        precond_iters=precond_iters,
+    )
+    
     results: List[PDLPExperimentResult] = []
 
     # Configure PDLP based on module flags
@@ -288,15 +295,14 @@ def run_pdlp_module_experiment(
     # If primal weight is disabled, we need to keep omega constant (not implemented, so we enable it)
     # For now, we rely on restart_mode and kkt_params to control behavior
 
-    for case_path in case_paths:
-        case_name = case_path.stem
+    for case_name, preprocessed in preprocessed_cases.items():
         for tol in tolerances:
             print(
                 f"Running {case_name} with restart_mode={restart_mode}, "
                 f"adaptive_step={enable_adaptive_step}, primal_weight={enable_primal_weight}, tol={tol}"
             )
             result, _, _, _ = run_pdlp(
-                str(case_path),
+                preprocessed,
                 max_K_multi=max_K_multi,
                 tol=tol,
                 check_every=check_every,
@@ -342,11 +348,17 @@ def run_pdlp_grid_search_experiment(
     objective_stride: int = 50,
 ) -> List[PDLPExperimentResult]:
     """Run PDLP grid search on restart trigger parameters."""
-    case_paths = resolve_case_paths(cases_folder)
+    # Preload all cases once at the beginning
+    preprocessed_cases = preload_cases(
+        cases_folder,
+        precond=precond,
+        precond_tol=precond_tol,
+        precond_iters=precond_iters,
+    )
+    
     results: List[PDLPExperimentResult] = []
 
-    for case_path in case_paths:
-        case_name = case_path.stem
+    for case_name, preprocessed in preprocessed_cases.items():
         for param_value in parameter_values:
             # Build kkt_params with the varying parameter
             kkt_params = fixed_params.copy()
@@ -357,7 +369,7 @@ def run_pdlp_grid_search_experiment(
                     f"Running {case_name} with {parameter_name}={param_value}, tol={tol}"
                 )
                 result, _, _, _ = run_pdlp(
-                    str(case_path),
+                    preprocessed,
                     max_K_multi=max_K_multi,
                     tol=tol,
                     check_every=check_every,

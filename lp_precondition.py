@@ -4,6 +4,7 @@ from typing import Literal, Tuple
 import numpy as np
 
 from mps_process import LPData
+from operations import estimate_spectral_norm
 
 PrecondMethod = Literal["none", "pc", "ruiz", "ruiz_pc"]
 
@@ -119,6 +120,25 @@ def apply_preconditioner(
         lower_scaled = lp.lower / accum_D2
         upper_scaled = lp.upper / accum_D2
 
+    # Recompute norms for the preconditioned matrix K_scaled
+    # Build K_scaled matrix: K_scaled = [G_scaled; A_scaled]
+    if G_scaled.shape[0] > 0 and A_scaled.shape[0] > 0:
+        K_scaled = np.vstack([G_scaled, A_scaled])
+    elif G_scaled.shape[0] > 0:
+        K_scaled = G_scaled
+    elif A_scaled.shape[0] > 0:
+        K_scaled = A_scaled
+    else:
+        K_scaled = np.zeros((0, lp.n_vars), dtype=float)
+    
+    # Compute norms with fixed seed for reproducibility
+    if K_scaled.size > 0:
+        norm_2_scaled = estimate_spectral_norm(K_scaled, iters=20, seed=42)
+        norm_inf_scaled = float(np.linalg.norm(K_scaled, ord=np.inf))
+    else:
+        norm_2_scaled = 0.0
+        norm_inf_scaled = 0.0
+
     scaled_lp = LPData(
         c=c_scaled,
         A=A_scaled,
@@ -131,6 +151,8 @@ def apply_preconditioner(
         m_eq=lp.m_eq,
         m_ineq=lp.m_ineq,
         n_vars=lp.n_vars,
+        norm_2=norm_2_scaled,
+        norm_inf=norm_inf_scaled,
     )
 
     precond = PreconditionerData(

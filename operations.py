@@ -1,8 +1,9 @@
-from typing import Callable, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Optional, Tuple
 
 import numpy as np
 
-from mps_process import LPData
+if TYPE_CHECKING:
+    from mps_process import LPData
 
 
 def proj_box(x: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> np.ndarray:
@@ -89,7 +90,7 @@ def project_lambda(v: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> np.nd
 
 
 def compute_duality_gap(
-    lp: LPData,
+    lp: "LPData",
     x: np.ndarray,
     y: np.ndarray,
     omega: float,

@@ -11,6 +11,8 @@ import numpy as np
 import pandas as pd
 from highspy import Highs, HighsStatus, ObjSense, HighsVarType  # type: ignore[import]
 
+from operations import estimate_spectral_norm
+
 
 @dataclass
 class LPData:
@@ -27,6 +29,8 @@ class LPData:
     m_eq: int
     m_ineq: int
     n_vars: int
+    norm_2: float  # Spectral norm (2-norm) of constraint matrix K
+    norm_inf: float  # Infinity norm of constraint matrix K
 
 
 @contextmanager
@@ -123,6 +127,26 @@ def _load_highs_model(path: str) -> Tuple[Highs, LPData]:
     G = np.asarray(G_rows, dtype=float) if G_rows else np.zeros((0, n), dtype=float)
     h = np.asarray(h_vals, dtype=float) if h_vals else np.zeros((0,), dtype=float)
 
+    # Compute matrix norms for reproducibility (using fixed seed)
+    # Build K matrix: K = [G; A]
+    if G.shape[0] > 0 and A_eq.shape[0] > 0:
+        K = np.vstack([G, A_eq])
+    elif G.shape[0] > 0:
+        K = G
+    elif A_eq.shape[0] > 0:
+        K = A_eq
+    else:
+        K = np.zeros((0, n), dtype=float)
+    
+    # Compute norms with fixed seed for reproducibility
+    # Use seed=42 for deterministic results across runs
+    if K.size > 0:
+        norm_2 = estimate_spectral_norm(K, iters=20, seed=42)
+        norm_inf = float(np.linalg.norm(K, ord=np.inf))
+    else:
+        norm_2 = 0.0
+        norm_inf = 0.0
+
     lp_data = LPData(
         c=c,
         A=A_eq,
@@ -135,6 +159,8 @@ def _load_highs_model(path: str) -> Tuple[Highs, LPData]:
         m_eq=A_eq.shape[0],
         m_ineq=G.shape[0],
         n_vars=n,
+        norm_2=norm_2,
+        norm_inf=norm_inf,
     )
     return highs, lp_data
 

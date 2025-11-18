@@ -1,10 +1,76 @@
+from dataclasses import dataclass
 from pathlib import Path
 
 from algo_PDHG import PDHGResult, pdhg
 from algo_PDLP import PDLPResult, pdlp
 from lp_precondition import PrecondMethod, PreconditionerData, apply_preconditioner
 from mps_process import LPData, get_reference_objective, read_mps
-from typing import Optional, Dict
+from typing import Optional, Dict, Union
+
+
+@dataclass
+class PreprocessedCase:
+    """Preprocessed case data for experiments (loaded once, reused multiple times)."""
+    
+    case_path: Path
+    case_name: str
+    lp: LPData  # Original LP data
+    lp_scaled: LPData  # Preconditioned LP data
+    precond_data: PreconditionerData
+    reference_objective: float
+
+
+def preload_cases(
+    cases_folder: Path,
+    *,
+    precond: PrecondMethod = "ruiz_pc",
+    precond_tol: float = 1e-2,
+    precond_iters: int = 10,
+) -> Dict[str, PreprocessedCase]:
+    """
+    Preload and preprocess all cases from a folder.
+    
+    This function reads all MPS files, applies preconditioning, and computes norms
+    once at the beginning. The results can be reused across multiple algorithm runs
+    with different parameters, improving efficiency and ensuring reproducibility.
+    
+    Args:
+        cases_folder: Path to folder containing MPS files
+        precond: Preconditioning method
+        precond_tol: Preconditioning tolerance
+        precond_iters: Maximum preconditioning iterations
+        
+    Returns:
+        Dictionary mapping case names to PreprocessedCase objects
+    """
+    case_paths = resolve_case_paths(cases_folder)
+    preprocessed: Dict[str, PreprocessedCase] = {}
+    
+    print(f"Preloading {len(case_paths)} cases...")
+    for case_path in case_paths:
+        case_name = case_path.stem
+        print(f"  Loading {case_name}...")
+        
+        reference_objective = get_reference_objective(str(case_path))
+        lp = read_mps(str(case_path))
+        lp_scaled, precond_data = apply_preconditioner(
+            lp,
+            method=precond,
+            tol=precond_tol,
+            max_iters=precond_iters,
+        )
+        
+        preprocessed[case_name] = PreprocessedCase(
+            case_path=case_path,
+            case_name=case_name,
+            lp=lp,
+            lp_scaled=lp_scaled,
+            precond_data=precond_data,
+            reference_objective=reference_objective,
+        )
+    
+    print(f"Preloaded {len(preprocessed)} cases.")
+    return preprocessed
 
 
 def run_pdhg(
@@ -48,7 +114,7 @@ def run_pdhg(
 
 
 def run_pdlp(
-    case_path: str,
+    case_path_or_preprocessed: Union[str, PreprocessedCase],
     *,
     max_K_multi: int = 100000,
     tol: float = 1e-6,
@@ -63,15 +129,37 @@ def run_pdlp(
     enable_adaptive_step: bool = True,
     enable_primal_weight: bool = True,
 ) -> tuple[PDLPResult, PreconditionerData, LPData, float]:
-    path = Path(case_path).expanduser().resolve()
-    reference_objective = get_reference_objective(str(path))
-    lp = read_mps(str(path))
-    lp_scaled, precond_data = apply_preconditioner(
-        lp,
-        method=precond,
-        tol=precond_tol,
-        max_iters=precond_iters,
-    )
+    """
+    Run PDLP algorithm on a case.
+    
+    Args:
+        case_path_or_preprocessed: Either a path string to an MPS file, or a PreprocessedCase
+                                   object. If PreprocessedCase is provided, the preprocessed data
+                                   is reused (more efficient for experiments).
+        Other arguments: Algorithm parameters
+        
+    Returns:
+        Tuple of (result, precond_data, lp, reference_objective)
+    """
+    # Handle both string path and PreprocessedCase
+    if isinstance(case_path_or_preprocessed, PreprocessedCase):
+        # Use preprocessed data
+        preprocessed = case_path_or_preprocessed
+        lp_scaled = preprocessed.lp_scaled
+        precond_data = preprocessed.precond_data
+        lp = preprocessed.lp
+        reference_objective = preprocessed.reference_objective
+    else:
+        # Load from path (backward compatibility)
+        path = Path(case_path_or_preprocessed).expanduser().resolve()
+        reference_objective = get_reference_objective(str(path))
+        lp = read_mps(str(path))
+        lp_scaled, precond_data = apply_preconditioner(
+            lp,
+            method=precond,
+            tol=precond_tol,
+            max_iters=precond_iters,
+        )
 
     result = pdlp(
         lp_scaled,
@@ -119,4 +207,4 @@ def _is_supported_case(path: Path) -> bool:
     return len(suffixes) >= 2 and suffixes[-2:] == [".mps", ".bz2"]
 
 
-__all__ = ["run_pdhg", "run_pdlp", "resolve_case_paths"]
+__all__ = ["run_pdhg", "run_pdlp", "resolve_case_paths", "preload_cases", "PreprocessedCase"]

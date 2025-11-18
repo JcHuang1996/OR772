@@ -5,7 +5,7 @@ import numpy as np
 
 from lp_precondition import PreconditionerData
 from mps_process import LPData
-from operations import estimate_spectral_norm, proj_box, proj_dual
+from operations import proj_box, proj_dual
 
 
 @dataclass
@@ -70,10 +70,10 @@ def pdhg(
         stride=objective_stride,
     )
 
-    # Disable counting for spectral norm estimation (preconditioning/initialization)
-    tracker.disable_counting()
-    norm_K = estimate_spectral_norm(K, iters=power_iterations, matvec_callback=lambda: tracker.bump())
-    tracker.enable_counting()
+    # Use precomputed norm_2 from LPData for reproducibility
+    # Norms are computed during problem loading with fixed seed
+    # Note: power_iterations parameter is now ignored (fixed to 20 iterations during loading)
+    norm_K = lp.norm_2
     denom = max(norm_K, 1e-8)
     eta = eta_scale / denom
     tau = eta / omega
