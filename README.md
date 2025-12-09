@@ -113,13 +113,6 @@ Each run creates a timestamped subdirectory summarising:
 - A multi-case summary CSV (if more than one model is processed).
 - Optional per-case trace CSVs (`*_trace.csv`) whenever `--objective-stride > 0`, capturing `(K multiplications, |objective − reference|)` samples.
 
-## Files
-
-- `mps_process.py`: MPS reader and HiGHS/Gurobi reference solver wrappers (stdout logging only).
-- `lp_precondition.py`: Diagonal preconditioners (Ruiz and Pock–Chambolle).
-- `operations.py`: Projection and norm utilities shared by both solvers.
-- `algo_PDHG.py`: PDHG algorithm, instrumentation, and result container.
-- `algo_PDLP.py`: PDLP algorithm with adaptive modules and instrumentation.
-- `main.py`: Shared orchestration helpers (loading, preconditioning, reference solving).
-- `run_PDHG.py`, `run_PDLP.py`: CLI entry points supporting single-case or batch execution.
+## AI USAGE
+The code is completed by using Cursor AI's auto model and vibe coding. The text files for AI instruction are in \docs, and the agent rule is in AGENT.md
 

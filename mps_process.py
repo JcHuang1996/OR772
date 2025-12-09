@@ -56,6 +56,7 @@ def _normalized_model_path(path: str) -> Iterator[str]:
 
 
 def _load_highs_model(path: str) -> Tuple[Highs, LPData]:
+    # Initialize HiGHS solver and load MPS model file
     highs = Highs()
     highs.setOptionValue("output_flag", False)
     with _normalized_model_path(path) as actual_path:
@@ -66,9 +67,13 @@ def _load_highs_model(path: str) -> Tuple[Highs, LPData]:
 
     lp = highs.getLp()
 
+    # Get problem dimensions
+    # n: number of variables (dimension of x in PDHG notation)
+    # m: number of constraints (rows in the constraint matrix)
     n = lp.num_col_
     m = lp.num_row_
 
+    # Relax any integrality constraints to make it a continuous LP
     if hasattr(lp, "integrality_") and len(lp.integrality_) != 0:
         indices = np.arange(n, dtype=np.int32)
         types = np.full(n, HighsVarType.kContinuous.value, dtype=np.uint8)
@@ -78,22 +83,30 @@ def _load_highs_model(path: str) -> Tuple[Highs, LPData]:
             raise RuntimeError("Failed to relax integrality constraints in model.")
         lp = highs.getLp()
 
+    # Read objective vector c (for primal problem: min c^T x in PDHG notation)
     c = np.asarray(lp.col_cost_, dtype=float)
-    lb = np.asarray(lp.col_lower_, dtype=float)
-    ub = np.asarray(lp.col_upper_, dtype=float)
+    # Read variable bounds: l (lower) and u (upper) for X = {x | l ≤ x ≤ u} in PDHG notation
+    lb = np.asarray(lp.col_lower_, dtype=float)  # l: lower bounds
+    ub = np.asarray(lp.col_upper_, dtype=float)  # u: upper bounds
+    # Read row constraint bounds (will be used to separate equality and inequality constraints)
     row_lower = np.asarray(lp.row_lower_, dtype=float)
     row_upper = np.asarray(lp.row_upper_, dtype=float)
     obj_offset = float(lp.offset_) if hasattr(lp, "offset_") else 0.0
 
+    # Handle maximization: convert max to min by negating objective
+    # Ensures standard form: min c^T x (as in PDHG primal formulation)
     _, sense = getattr(highs, "getObjectiveSense")()
     if sense == ObjSense.kMaximize:
         c = -c
         obj_offset = -obj_offset
 
+    # Extract sparse constraint matrix from HiGHS (column-compressed format)
     start = lp.a_matrix_.start_
     index = lp.a_matrix_.index_
     value = lp.a_matrix_.value_
 
+    # Convert sparse matrix to dense format (m x n constraint matrix)
+    # This matrix contains all constraints before separating into A (equality) and G (inequality)
     matrix = np.zeros((m, n), dtype=float)
     for j in range(n):
         col_start = start[j]
@@ -102,6 +115,12 @@ def _load_highs_model(path: str) -> Tuple[Highs, LPData]:
             i = index[kk]
             matrix[i, j] = value[kk]
 
+    # Separate constraints into equality (Ax = b) and inequality (Gx ≥ h) forms
+    # Following PDHG notation:
+    # - A: equality constraint matrix (for Ax = b)
+    # - b: equality constraint RHS (for Ax = b)
+    # - G: inequality constraint matrix (for Gx ≥ h)
+    # - h: inequality constraint RHS (for Gx ≥ h)
     eq_rows = []
     b_eq = []
     G_rows = []
@@ -111,10 +130,17 @@ def _load_highs_model(path: str) -> Tuple[Highs, LPData]:
         lower = row_lower[i]
         upper = row_upper[i]
         row = matrix[i]
+        # Equality constraint: lower == upper (within tolerance)
+        # Contributes to A (equality matrix) and b (equality RHS)
         if np.isfinite(lower) and np.isfinite(upper) and abs(lower - upper) <= tol:
             eq_rows.append(row)
             b_eq.append(lower)
         else:
+            # Inequality constraint: lower ≤ row·x or row·x ≤ upper
+            # Convert to standard form Gx ≥ h:
+            # - If lower bound exists: row·x ≥ lower → add row to G, lower to h
+            # - If upper bound exists: row·x ≤ upper → add -row to G, -upper to h
+            # (Note: converts "≤" to "≥" by multiplying by -1)
             if np.isfinite(lower):
                 G_rows.append(row)
                 h_vals.append(lower)
@@ -122,6 +148,13 @@ def _load_highs_model(path: str) -> Tuple[Highs, LPData]:
                 G_rows.append(-row)
                 h_vals.append(-upper)
 
+    # Finalize constraint matrices and RHS vectors in PDHG notation:
+    # A: equality constraint matrix (m_eq × n) for Ax = b
+    # b: equality constraint RHS (m_eq × 1) for Ax = b
+    # G: inequality constraint matrix (m_ineq × n) for Gx ≥ h
+    # h: inequality constraint RHS (m_ineq × 1) for Gx ≥ h
+    # Note: Later, K = [G; A] (vertical stacking) and q = [h; b] (vertical stacking)
+    # such that K^T = [G^T, A^T] and q^T = [h^T, b^T] as in PDHG notation
     A_eq = np.asarray(eq_rows, dtype=float) if eq_rows else np.zeros((0, n), dtype=float)
     b_eq = np.asarray(b_eq, dtype=float) if b_eq else np.zeros((0,), dtype=float)
     G = np.asarray(G_rows, dtype=float) if G_rows else np.zeros((0, n), dtype=float)
